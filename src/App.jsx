@@ -95,270 +95,107 @@ async function supabaseRefreshSession(refreshToken) {
 // nothing and you sign in fresh each time. Once this file is hosted for
 // real (e.g. on Netlify, which is how this app is meant to run), it's a
 // normal webpage with normal storage, and sessions persist properly.
-const OFFLINE_DB = "brightfuture_offline_v1";
-const OFFLINE_DB_VERSION = 1;
-const OFFLINE_CACHE_STORE = "cache";
-const OFFLINE_QUEUE_STORE = "queue";
-const OFFLINE_PHOTO_STORE = "photos";
-
-function openOfflineDb() {
-  return new Promise((resolve, reject) => {
-    if (!window.indexedDB) return reject(new Error("IndexedDB is not available."));
-    const req = indexedDB.open(OFFLINE_DB, OFFLINE_DB_VERSION);
-    req.onupgradeneeded = () => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains(OFFLINE_CACHE_STORE)) db.createObjectStore(OFFLINE_CACHE_STORE, { keyPath: "key" });
-      if (!db.objectStoreNames.contains(OFFLINE_QUEUE_STORE)) db.createObjectStore(OFFLINE_QUEUE_STORE, { keyPath: "id", autoIncrement: true });
-      if (!db.objectStoreNames.contains(OFFLINE_PHOTO_STORE)) db.createObjectStore(OFFLINE_PHOTO_STORE, { keyPath: "id" });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function idbPut(store, value) {
-  const db = await openOfflineDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(value);
-    tx.oncomplete = () => { db.close(); resolve(value); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
-  });
-}
-async function idbGet(store, key) {
-  const db = await openOfflineDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readonly");
-    const req = tx.objectStore(store).get(key);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => db.close();
-  });
-}
-async function idbGetAll(store) {
-  const db = await openOfflineDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readonly");
-    const req = tx.objectStore(store).getAll();
-    req.onsuccess = () => resolve(req.result || []);
-    req.onerror = () => reject(req.error);
-    tx.oncomplete = () => db.close();
-  });
-}
-async function idbDelete(store, key) {
-  const db = await openOfflineDb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).delete(key);
-    tx.oncomplete = () => { db.close(); resolve(); };
-    tx.onerror = () => { db.close(); reject(tx.error); };
-  });
-}
-
-const offlineId = () => `offline-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-const pathTable = (path) => String(path).split("?")[0].replace(/^\/+/, "");
-const queryParams = (path) => new URLSearchParams(String(path).split("?")[1] || "");
-const fieldFromFilter = (key) => ({
-  eq: "eq", in: "in", not: "not"
-}[key] || key);
-
-function rowMatchesPath(row, path) {
-  const params = queryParams(path);
-  for (const [key, value] of params.entries()) {
-    if (["select", "order", "limit", "on_conflict", "columns"].includes(key)) continue;
-    const m = value.match(/^(eq|neq|gt|gte|lt|lte|is|not\.is|in)\.(.*)$/);
-    if (!m) continue;
-    const op = m[1];
-    const wanted = decodeURIComponent(m[2]);
-    const actual = row?.[key];
-    if (op === "eq" && String(actual) !== wanted) return false;
-    if (op === "neq" && String(actual) === wanted) return false;
-    if (op === "is" && wanted === "null" && actual != null) return false;
-    if (op === "not.is" && wanted === "null" && actual == null) return false;
-    if (op === "in") {
-      const vals = wanted.replace(/^\(|\)$/, "").split(",").map((v) => v.replace(/^"|"$/g, ""));
-      if (!vals.includes(String(actual))) return false;
-    }
-  }
-  return true;
-}
-
-function syntheticRows(path, body) {
-  const rows = Array.isArray(body) ? body : [body];
-  return rows.map((item) => ({ ...item, id: item?.id ?? offlineId(), created_at: item?.created_at ?? new Date().toISOString() }));
-}
-
-async function cacheGet(path) {
-  const hit = await idbGet(OFFLINE_CACHE_STORE, path).catch(() => null);
-  return hit?.value ?? null;
-}
-async function cachePut(path, value) {
-  await idbPut(OFFLINE_CACHE_STORE, { key: path, value, savedAt: Date.now() }).catch(() => {});
-}
-
-async function applyMutationToCaches(path, method, body, responseRows = []) {
-  const table = pathTable(path);
-  const all = await idbGetAll(OFFLINE_CACHE_STORE).catch(() => []);
-  const conflictFields = (queryParams(path).get("on_conflict") || "").split(",").filter(Boolean);
-  for (const entry of all) {
-    if (pathTable(entry.key) !== table || !Array.isArray(entry.value)) continue;
-    let rows = [...entry.value];
-    if (method === "POST") {
-      const incoming = Array.isArray(responseRows) && responseRows.length ? responseRows : syntheticRows(path, body);
-      for (const row of incoming) {
-        if (conflictFields.length) {
-          const idx = rows.findIndex((old) => conflictFields.every((f) => String(old?.[f]) === String(row?.[f])));
-          if (idx >= 0) rows[idx] = { ...rows[idx], ...row };
-          else rows.push(row);
-        } else rows.push(row);
-      }
-    } else if (method === "PATCH") {
-      rows = rows.map((row) => rowMatchesPath(row, path) ? { ...row, ...(body || {}) } : row);
-    } else if (method === "DELETE") {
-      rows = rows.filter((row) => !rowMatchesPath(row, path));
-    }
-    await cachePut(entry.key, rows);
-  }
-}
-
-async function queueOfflineMutation(path, method, body, prefer, clientIds = []) {
-  await idbPut(OFFLINE_QUEUE_STORE, { path, method, body: body ?? null, prefer: prefer || "return=representation", clientIds, queuedAt: Date.now() });
-}
-
-async function saveOfflinePhoto(dataUrl) {
-  const id = offlineId();
-  await idbPut(OFFLINE_PHOTO_STORE, { id, dataUrl, createdAt: Date.now() });
-  return `offline-photo:${id}`;
-}
-
-async function uploadPendingPhoto(token, dataUrl, folder) {
-  const blob = await (await fetch(dataUrl)).blob();
-  const ext = (blob.type.split("/")[1] || "jpg").replace(/[^a-z0-9]/gi, "");
-  const path = `${folder}/${Date.now()}-${offlineId()}.${ext}`;
-  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/school-photos/${path}`, {
-    method: "POST", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": blob.type || "image/jpeg", "x-upsert": "true" }, body: blob,
-  });
-  if (!res.ok) throw new Error("Pending photo upload failed.");
-  return `${SUPABASE_URL}/storage/v1/object/public/school-photos/${path}`;
-}
-
-async function replaceOfflinePhotos(value, token) {
-  if (typeof value === "string" && value.startsWith("offline-photo:")) {
-    const id = value.slice("offline-photo:".length);
-    const rec = await idbGet(OFFLINE_PHOTO_STORE, id);
-    if (!rec) return value;
-    const url = await uploadPendingPhoto(token, rec.dataUrl, "photos");
-    await idbDelete(OFFLINE_PHOTO_STORE, id).catch(() => {});
-    return url;
-  }
-  if (Array.isArray(value)) return Promise.all(value.map((v) => replaceOfflinePhotos(v, token)));
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = await replaceOfflinePhotos(v, token);
-    return out;
-  }
-  return value;
-}
-
-async function replaceClientIds(value, idMap) {
-  if (typeof value === "string" && idMap.has(value)) return idMap.get(value);
-  if (Array.isArray(value)) return Promise.all(value.map((v) => replaceClientIds(v, idMap)));
-  if (value && typeof value === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = await replaceClientIds(v, idMap);
-    return out;
-  }
-  return value;
-}
-
-async function replaceIdsInOfflineCache(idMap) {
-  if (!idMap.size) return;
-  const all = await idbGetAll(OFFLINE_CACHE_STORE).catch(() => []);
-  for (const entry of all) {
-    if (!Array.isArray(entry.value)) continue;
-    const value = await replaceClientIds(entry.value, idMap);
-    await cachePut(entry.key, value);
-  }
-}
-
-async function flushOfflineQueue(token) {
-  if (!navigator.onLine) return { flushed: 0, remaining: (await idbGetAll(OFFLINE_QUEUE_STORE).catch(() => [])).length };
-  const items = await idbGetAll(OFFLINE_QUEUE_STORE).catch(() => []);
-  let flushed = 0;
-  const idMap = new Map();
-  for (const item of items.sort((a, b) => a.id - b.id)) {
-    try {
-      const mappedItem = { ...item, path: await replaceClientIds(item.path, idMap), body: await replaceClientIds(item.body, idMap) };
-      const body = await replaceOfflinePhotos(mappedItem.body, token);
-      const path = mappedItem.path;
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-        method: item.method,
-        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: item.prefer || "return=representation" },
-        body: body == null ? undefined : JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`Sync failed (${res.status})`);
-      const text = await res.text();
-      const serverRows = text ? JSON.parse(text) : [];
-      const rows = Array.isArray(serverRows) ? serverRows : (serverRows ? [serverRows] : []);
-      if (item.clientIds?.length && rows.length) {
-        item.clientIds.forEach((clientId, index) => {
-          const realId = rows[index]?.id;
-          if (realId != null) idMap.set(clientId, realId);
-        });
-        await replaceIdsInOfflineCache(idMap);
-        const remaining = await idbGetAll(OFFLINE_QUEUE_STORE).catch(() => []);
-        for (const q of remaining) {
-          if (q.id <= item.id) continue;
-          q.body = await replaceClientIds(q.body, idMap);
-          q.path = await replaceClientIds(q.path, idMap);
-          await idbPut(OFFLINE_QUEUE_STORE, q);
-        }
-      }
-      await applyMutationToCaches(path, item.method, body, rows);
-      await idbDelete(OFFLINE_QUEUE_STORE, item.id);
-      flushed++;
-    } catch (err) {
-      // Keep the first failed operation so dependent operations remain ordered.
-      break;
-    }
-  }
-  return { flushed, remaining: (await idbGetAll(OFFLINE_QUEUE_STORE).catch(() => [])).length };
-}
-
-function offlineDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 const SESSION_KEY = "brightfuture_session";
-const PROFILE_KEY = "brightfuture_offline_profile";
 const sessionStore = {
   save(refreshToken, profile = null) {
-    try {
-      window.localStorage.setItem(SESSION_KEY, JSON.stringify({ refreshToken }));
-      if (profile) window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-    } catch (e) { /* storage unavailable — offline cache still handles school data */ }
+    try { window.localStorage.setItem(SESSION_KEY, JSON.stringify({ refreshToken, profile })); } catch (e) { /* storage unavailable */ }
   },
   read() {
     try {
       const raw = window.localStorage.getItem(SESSION_KEY);
-      return raw ? JSON.parse(raw).refreshToken : null;
-    } catch (e) { return null; }
-  },
-  readProfile() {
-    try {
-      const raw = window.localStorage.getItem(PROFILE_KEY);
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   },
   clear() {
-    try { window.localStorage.removeItem(SESSION_KEY); window.localStorage.removeItem(PROFILE_KEY); } catch (e) { /* ignore */ }
+    try { window.localStorage.removeItem(SESSION_KEY); } catch (e) { /* storage unavailable */ }
   },
 };
+
+/* ---------------------------------------------------------------------- *
+ * OFFLINE-FIRST DATA LAYER
+ *
+ * The UI talks to pgFetch() exactly as before, but pgFetch now keeps a
+ * local IndexedDB copy of every table read from Supabase and queues writes
+ * when the network is unavailable. This is deliberately below the existing
+ * data functions so Students, Staff, Fees, Marks, Attendance, Library,
+ * Front Office, Timetable, etc. all get the same offline behaviour.
+ * ---------------------------------------------------------------------- */
+const OFFLINE_DB = "brightfuture_offline_v2";
+const OFFLINE_STORE = "kv";
+let offlineDbPromise;
+const offlineDb = () => {
+  if (offlineDbPromise) return offlineDbPromise;
+  offlineDbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("IndexedDB is not available on this device."));
+    const req = indexedDB.open(OFFLINE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(OFFLINE_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return offlineDbPromise;
+};
+async function offlineGet(key) {
+  try { const db = await offlineDb(); return await new Promise((res, rej) => { const r=db.transaction(OFFLINE_STORE,"readonly").objectStore(OFFLINE_STORE).get(key); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); } catch { return undefined; }
+}
+async function offlinePut(key, value) {
+  try { const db=await offlineDb(); await new Promise((res,rej)=>{const r=db.transaction(OFFLINE_STORE,"readwrite").objectStore(OFFLINE_STORE).put(value,key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);}); } catch {}
+}
+async function offlineDelete(key) {
+  try { const db=await offlineDb(); await new Promise((res,rej)=>{const r=db.transaction(OFFLINE_STORE,"readwrite").objectStore(OFFLINE_STORE).delete(key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);}); } catch {}
+}
+const isUuidTable = (table) => ["notifications","visitors","library_books","book_issues","staff_profiles"].includes(table);
+const tempId = (table) => isUuidTable(table) ? crypto.randomUUID() : -Math.floor(Date.now() + Math.random()*1000);
+const tableOf = (path) => String(path).split("?")[0].split("/").pop();
+const parseFilters = (path) => {
+  const q = path.includes("?") ? path.split("?")[1] : ""; const out=[];
+  for (const part of q.split("&")) { const [k,v]=part.split("="); if (!k||!v) continue; const dec=decodeURIComponent(v);
+    if (dec.startsWith("eq.")) out.push([k,"eq",dec.slice(3)]);
+    else if (dec.startsWith("in.(") && dec.endsWith(")")) out.push([k,"in",dec.slice(4,-1).split(",")]);
+  } return out;
+};
+const matchesFilter = (row, filters) => filters.every(([k,op,v]) => {
+  const rv=row?.[k]; if(op==="eq") return String(rv)===String(v); return v.includes(String(rv));
+});
+async function offlineRead(path) {
+  const table=tableOf(path); let rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) return null;
+  const filters=parseFilters(path); rows=filters.length?rows.filter(r=>matchesFilter(r,filters)):rows.slice();
+  const q=path.includes("?")?path.split("?")[1]:""; const order=(q.match(/order=([^&]+)/)||[])[1];
+  if(order){ const [field,dir]=order.split("."); rows.sort((a,b)=>String(a?.[field]??"").localeCompare(String(b?.[field]??""),undefined,{numeric:true})*(dir==="desc"?-1:1)); }
+  const lm=(q.match(/limit=(\d+)/)||[])[1]; if(lm) rows=rows.slice(0,Number(lm));
+  return rows;
+}
+async function offlineMergeTable(table, incoming, mode="upsert", filters=[]) {
+  let rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) rows=[];
+  const arr=Array.isArray(incoming)?incoming:[incoming];
+  const key=(r)=>r?.id!=null?`id:${r.id}`:JSON.stringify(r);
+  if(mode==="delete") rows=rows.filter(r=>!arr.some(x=>matchesFilter(r,filters.length?filters:[["id","eq",x?.id]])));
+  else for(const item of arr){ const idx=rows.findIndex(r=>key(r)===key(item)); if(idx>=0) rows[idx]={...rows[idx],...item}; else rows.push(item); }
+  await offlinePut(`table:${table}`,rows); return rows;
+}
+let offlineSyncRunning=false;
+async function syncOfflineQueue() {
+  if(offlineSyncRunning || !navigator.onLine) return; offlineSyncRunning=true;
+  try {
+    let queue=await offlineGet("syncQueue"); if(!Array.isArray(queue)||!queue.length) return;
+    const remaining=[];
+    const idMap={};
+    const replaceIds=(value)=>{ if(value==null)return value; if(typeof value==='string'&&idMap[value])return idMap[value]; if(typeof value==='number'&&idMap[String(value)])return idMap[String(value)]; if(Array.isArray(value))return value.map(replaceIds); if(typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,replaceIds(v)])); return value; };
+    for(const item of queue){
+      try {
+        const path=replaceIds(item.path), options={...item.options, body:replaceIds(item.options?.body)};
+        const result=await pgFetch(path,item.token,{...options,_fromSync:true});
+        if(item.tempId && result?.[0]?.id!=null) idMap[item.tempId]=result[0].id;
+      } catch { remaining.push(item); }
+    }
+    await offlinePut("syncQueue",remaining);
+    // Replace temporary offline IDs in every cached table after successful sync.
+    for (const table of ["students","grades","attendance","payments","fee_structure","staff_profiles","classes","subjects","class_subject_teachers","timetable_entries","staff_payroll","payslips","expenditures","sms_messages","visitors","library_books","book_issues","notifications","notification_reads","marks","report_remarks","events","exams"]){
+      const rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) continue;
+      const replaced=rows.map(r=>replaceIds(r)); await offlinePut(`table:${table}`,replaced);
+    }
+  } finally { offlineSyncRunning=false; }
+}
+window.addEventListener("online",()=>{ setTimeout(syncOfflineQueue,300); });
 
 // Sends a password-reset email via Supabase Auth. The link inside it
 // redirects back to wherever this app is currently running (Netlify, or
@@ -410,85 +247,42 @@ async function fetchStaffProfile(accessToken, userId) {
  * ---------------------------------------------------------------------- */
 async function pgFetch(path, token, options = {}) {
   const method = options.method || "GET";
-  const isRead = method === "GET";
+  const table = tableOf(path);
   const request = {
     method,
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      Prefer: options.prefer || "return=representation",
-    },
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: options.prefer || "return=representation" },
+    body: options.body ? JSON.stringify(options.body) : undefined,
   };
-
-  if (isRead) {
-    try {
-      if (!navigator.onLine) {
-        const cached = await cacheGet(path);
-        if (cached !== null) return cached;
-        throw new Error("No cached offline data is available for this section yet. Connect once to download it.");
-      }
-      const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, request);
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.message || `Request failed (${res.status})`);
-      }
-      if (res.status === 204) return null;
-      const text = await res.text();
-      const data = text ? JSON.parse(text) : null;
-      await cachePut(path, data);
-      return data;
-    } catch (err) {
-      const cached = await cacheGet(path);
-      if (cached !== null) return cached;
-      throw err;
-    }
+  if (method === "GET" && !navigator.onLine) {
+    const cached = await offlineRead(path);
+    if (cached !== null && cached !== undefined) return cached;
+    throw new Error("This data has not been downloaded yet. Connect to the internet once to make it available offline.");
   }
-
   try {
-    if (!navigator.onLine) throw new Error("offline");
     const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, request);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.message || `Request failed (${res.status})`);
-    }
-    if (res.status === 204) return null;
-    const text = await res.text();
-    const data = text ? JSON.parse(text) : null;
-    await applyMutationToCaches(path, method, options.body, Array.isArray(data) ? data : (data ? [data] : []));
+    if (!res.ok) { const err=await res.json().catch(()=>({})); throw new Error(err.message || `Request failed (${res.status})`); }
+    if (res.status === 204) { if(method!=="GET") await offlineMergeTable(table,[],"upsert"); return null; }
+    const text=await res.text(); const data=text?JSON.parse(text):null;
+    if(method === "GET" && Array.isArray(data)) await offlineMergeTable(table,data);
     return data;
   } catch (err) {
-    // Network failures are queued. Server-side validation/RLS errors are not
-    // silently queued because retrying the same invalid request would never
-    // fix it.
-    const networkFailure = !navigator.onLine || err?.message === "Failed to fetch" || err?.message === "offline" || err?.name === "TypeError";
-    if (!networkFailure) throw err;
-    let queuedBody = options.body;
-    const persistPhotos = async (value) => {
-      if (typeof value === "string" && value.startsWith("data:image/")) return await saveOfflinePhoto(value);
-      if (Array.isArray(value)) return Promise.all(value.map(persistPhotos));
-      if (value && typeof value === "object") {
-        const out = {};
-        for (const [k, v] of Object.entries(value)) out[k] = await persistPhotos(v);
-        return out;
-      }
-      return value;
-    };
-    queuedBody = await persistPhotos(queuedBody);
-    const synthetic = syntheticRows(path, options.body);
-    const clientIds = synthetic.map((row) => row.id).filter((id) => typeof id === "string" && id.startsWith("offline-"));
-    // Keep temporary IDs only as queue metadata; never send them to Postgres.
-    // Dependent queued records are rewritten to the real IDs after this insert
-    // succeeds online.
-    await queueOfflineMutation(path, method, queuedBody, options.prefer, clientIds);
-    // Return the original body to the UI so an offline photo remains
-    // immediately visible as a data URL. The queued copy uses its compact
-    // offline-photo token and is converted to a real Storage URL on sync.
-    await applyMutationToCaches(path, method, options.body, synthetic);
-    if (method === "POST" && (options.prefer || "").includes("return=minimal")) return null;
-    if (method === "POST") return synthetic;
-    return null;
+    if (method === "GET") { const cached=await offlineRead(path); if(cached!==null&&cached!==undefined) return cached; }
+    if (method !== "GET" && !options._fromSync) {
+      const body = options.body ? JSON.parse(JSON.stringify(options.body)) : undefined;
+      let optimistic = body ? {...body} : {};
+      const hasInsert = method === "POST";
+      if(hasInsert && optimistic.id == null) optimistic.id=tempId(table);
+      if(hasInsert) {
+        const now=new Date().toISOString(); if(optimistic.created_at==null) optimistic.created_at=now;
+        await offlineMergeTable(table,optimistic);
+      } else if(method === "PATCH") {
+        await offlineMergeTable(table,[],"upsert");
+        let rows=await offlineGet(`table:${table}`)||[]; const filters=parseFilters(path); rows=rows.map(r=>matchesFilter(r,filters)?{...r,...optimistic}:r); await offlinePut(`table:${table}`,rows);
+      } else if(method === "DELETE") { let rows=await offlineGet(`table:${table}`)||[]; const filters=parseFilters(path); rows=rows.filter(r=>!matchesFilter(r,filters)); await offlinePut(`table:${table}`,rows); }
+      const queue=await offlineGet("syncQueue")||[]; queue.push({path,token,options:{method,body,prefer:hasInsert ? "return=representation" : options.prefer},tempId:hasInsert?optimistic.id:null,queuedAt:Date.now()}); await offlinePut("syncQueue",queue);
+      return hasInsert ? [optimistic] : null;
+    }
+    throw err;
   }
 }
 
@@ -965,21 +759,14 @@ function teacherShort(name) {
 }
 
 async function fetchPublicSchoolName() {
-  const cached = (() => { try { return localStorage.getItem("brightfuture_school_name"); } catch (_) { return null; } })();
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_school_name`, {
-      method: "POST",
-      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!res.ok) throw new Error("Could not load school name");
-    const data = await res.json();
-    const name = typeof data === "string" ? data : (data?.name || "Brightfuture Primary School");
-    try { localStorage.setItem("brightfuture_school_name", name); } catch (_) {}
-    return name;
-  } catch (_) {
-    return cached || "Brightfuture Primary School";
-  }
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/get_school_name`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error("Could not load school name");
+  const data = await res.json();
+  return typeof data === "string" ? data : (data?.name || "Brightfuture Primary School");
 }
 
 /* ---------------------------------------------------------------------- *
@@ -989,19 +776,6 @@ async function fetchPublicSchoolName() {
  *  browser), so nobody can back-date or fake an arrival/departure time.
  * ---------------------------------------------------------------------- */
 async function rpcCall(token, fnName) {
-  if (!navigator.onLine) {
-    if (!fnName.startsWith("clock_")) throw new Error("This action requires an internet connection.");
-    const profile = sessionStore.readProfile();
-    const now = new Date();
-    const date = now.toISOString().slice(0, 10);
-    const time = now.toTimeString().slice(0, 8);
-    const cutoff = fnName === "clock_arrival" ? (profile?.arrivalCutoff || "07:20:00") : (profile?.departureCutoff || "17:00:00");
-    const row = fnName === "clock_arrival"
-      ? { id: offlineId(), staff_id: profile?.id, date, arrival_time: time, departure_time: null, late_arrival: time > cutoff, early_departure: false, late_reason: "", early_reason: "" }
-      : { id: offlineId(), staff_id: profile?.id, date, arrival_time: null, departure_time: time, late_arrival: false, early_departure: time < cutoff, late_reason: "", early_reason: "" };
-    await queueOfflineMutation(`rpc/${fnName}`, "POST", {}, "return=representation");
-    return row;
-  }
   const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fnName}`, {
     method: "POST",
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -1040,12 +814,6 @@ async function patchAttendanceReason(token, id, field, reason) {
 // `school-photos` storage bucket and returns its public URL. `folder`
 // keeps things tidy — e.g. "students", "staff", "school".
 async function uploadPhoto(token, file, folder) {
-  if (!navigator.onLine) {
-    // Keep the actual image in IndexedDB. The returned data URL is used by
-    // the UI immediately; the mutation queue replaces it with a Supabase
-    // Storage URL when connectivity returns.
-    return await offlineDataUrl(file);
-  }
   const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
   const path = `${folder}/${Date.now()}-${safeName}`;
   const res = await fetch(`${SUPABASE_URL}/storage/v1/object/school-photos/${path}`, {
@@ -1372,7 +1140,7 @@ export default function App() {
   const handleLogin = (profile) => {
     setAuthedUser(profile);
     setView(landingViewFor(profile.role));
-    sessionStore.save(profile.refreshToken, profile);
+    sessionStore.save(profile.refreshToken, { ...profile, accessToken: profile.accessToken });
     loadData(profile.accessToken, profile);
   };
 
@@ -1384,62 +1152,28 @@ export default function App() {
     const savedRefreshToken = sessionStore.read();
     if (!savedRefreshToken) { setRestoringSession(false); return; }
     (async () => {
+      const saved = sessionStore.read();
       try {
         const auth = await supabaseRefreshSession(savedRefreshToken);
         const profile = await fetchStaffProfile(auth.access_token, auth.user.id);
         if (cancelled) return;
         const fullProfile = { ...profile, accessToken: auth.access_token, refreshToken: auth.refresh_token };
-        setAuthedUser(fullProfile);
-        setView(landingViewFor(fullProfile.role));
-        sessionStore.save(auth.refresh_token, fullProfile);
+        setAuthedUser(fullProfile); setView(landingViewFor(fullProfile.role));
+        sessionStore.save(auth.refresh_token, { ...profile, accessToken: auth.access_token });
         loadData(auth.access_token, fullProfile);
       } catch (err) {
-        // If Supabase cannot be reached, resume the last locally cached
-        // profile and school data. The next online event refreshes auth.
-        const cachedProfile = sessionStore.readProfile();
-        if (cachedProfile && !navigator.onLine && !cancelled) {
-          setAuthedUser(cachedProfile);
-          setView(landingViewFor(cachedProfile.role));
-          loadData(cachedProfile.accessToken, cachedProfile);
-        } else {
-          sessionStore.clear();
-        }
+        // Offline: reuse the last profile/token and local IndexedDB data.
+        if (!navigator.onLine && saved?.profile?.id) {
+          const fullProfile = saved.profile;
+          setAuthedUser(fullProfile); setView(landingViewFor(fullProfile.role));
+          loadData(fullProfile.accessToken, fullProfile);
+        } else { sessionStore.clear(); }
       } finally {
         if (!cancelled) setRestoringSession(false);
       }
     })();
     return () => { cancelled = true; };
   }, []);
-
-  // Re-authenticate, flush queued offline changes, and refresh the cached
-  // school data whenever the phone regains connectivity.
-  useEffect(() => {
-    if (!authedUser) return;
-    let busy = false;
-    const syncWhenOnline = async () => {
-      if (busy || !navigator.onLine) return;
-      busy = true;
-      try {
-        let profile = authedUser;
-        if (profile.refreshToken) {
-          try {
-            const auth = await supabaseRefreshSession(profile.refreshToken);
-            profile = { ...profile, accessToken: auth.access_token, refreshToken: auth.refresh_token };
-            setAuthedUser(profile);
-            sessionStore.save(auth.refresh_token, profile);
-          } catch (_) { /* existing access token may still be valid */ }
-        }
-        const result = await flushOfflineQueue(profile.accessToken);
-        if (result.flushed) showToast(`${result.flushed} offline change${result.flushed === 1 ? "" : "s"} synced`);
-        await loadData(profile.accessToken, profile);
-      } finally {
-        busy = false;
-      }
-    };
-    window.addEventListener("online", syncWhenOnline);
-    if (navigator.onLine) syncWhenOnline();
-    return () => window.removeEventListener("online", syncWhenOnline);
-  }, [authedUser?.id]);
 
   // Last 5 weekdays ending today, merged with whatever dates already have
   // attendance recorded — so today is always markable and history stays visible.
@@ -1519,8 +1253,11 @@ export default function App() {
   // needs a privileged key this public frontend intentionally never holds.
   // Their photo is uploaded to storage right away so it's ready to attach
   // once their real profile row exists.
-  const addStaff = (member) => {
-    setStaff((prev) => [...prev, { ...member, id: Math.max(0, ...prev.map((s) => s.id)) + 1 }]);
+  const addStaff = async (member) => {
+    const localMember = { ...member, id: tempId("staff_profiles"), subjects: member.subjects || [], pendingLogin: true };
+    setStaff((prev) => [...prev, localMember]);
+    await offlineMergeTable("staff_profiles", { id: localMember.id, name: localMember.name, role: localMember.role, subjects: (localMember.subjects || []).join(";"), class_teacher_of: localMember.classTeacherOf || null, phone: localMember.phone || "", email: localMember.email || "", photo_url: localMember.photoUrl || null, designation: localMember.designation || null });
+    return localMember;
   };
 
   const addClass = async (name, fee) => {
@@ -1923,6 +1660,11 @@ export default function App() {
   };
 
   const createTeacherLogin = async (member) => {
+    if (!navigator.onLine) {
+      const localMember = await addStaff(member);
+      showToast("Staff saved offline. Their login will be created when internet is available.");
+      return localMember;
+    }
     const result = await callManageTeacher({
       action: "create", name: member.name, email: member.email, password: member.password,
       role: member.role, subjects: (member.subjects || []).join(";"), classTeacherOf: member.classTeacherOf,
