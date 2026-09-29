@@ -1,15 +1,9 @@
 {
   "name": "BrightFuture School Management",
-  "short_name": "BrightFuture",
-  "description": "BrightFuture School Management System",
+  "short_name": "BrightFuture School",
   "start_url": "/",
-  "scope": "/",
   "display": "standalone",
-  "orientation": "portrait-primary",
-  "background_color": "#F2EFE6",
-  "theme_color": "#152A4A",
-  "icons": [
-    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
-  ]
+  "background_color": "#f7f4ec",
+  "theme_color": "#243b2f",
+  "icons": []
 }
