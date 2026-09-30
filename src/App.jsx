@@ -97,105 +97,19 @@ async function supabaseRefreshSession(refreshToken) {
 // normal webpage with normal storage, and sessions persist properly.
 const SESSION_KEY = "brightfuture_session";
 const sessionStore = {
-  save(refreshToken, profile = null) {
-    try { window.localStorage.setItem(SESSION_KEY, JSON.stringify({ refreshToken, profile })); } catch (e) { /* storage unavailable */ }
+  save(refreshToken) {
+    try { window.localStorage.setItem(SESSION_KEY, JSON.stringify({ refreshToken })); } catch (e) { /* sandboxed preview — ignore */ }
   },
   read() {
     try {
       const raw = window.localStorage.getItem(SESSION_KEY);
-      return raw ? JSON.parse(raw) : null;
+      return raw ? JSON.parse(raw).refreshToken : null;
     } catch (e) { return null; }
   },
   clear() {
-    try { window.localStorage.removeItem(SESSION_KEY); } catch (e) { /* storage unavailable */ }
+    try { window.localStorage.removeItem(SESSION_KEY); } catch (e) { /* sandboxed preview — ignore */ }
   },
 };
-
-/* ---------------------------------------------------------------------- *
- * OFFLINE-FIRST DATA LAYER
- *
- * The UI talks to pgFetch() exactly as before, but pgFetch now keeps a
- * local IndexedDB copy of every table read from Supabase and queues writes
- * when the network is unavailable. This is deliberately below the existing
- * data functions so Students, Staff, Fees, Marks, Attendance, Library,
- * Front Office, Timetable, etc. all get the same offline behaviour.
- * ---------------------------------------------------------------------- */
-const OFFLINE_DB = "brightfuture_offline_v2";
-const OFFLINE_STORE = "kv";
-let offlineDbPromise;
-const offlineDb = () => {
-  if (offlineDbPromise) return offlineDbPromise;
-  offlineDbPromise = new Promise((resolve, reject) => {
-    if (!window.indexedDB) return reject(new Error("IndexedDB is not available on this device."));
-    const req = indexedDB.open(OFFLINE_DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(OFFLINE_STORE);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-  return offlineDbPromise;
-};
-async function offlineGet(key) {
-  try { const db = await offlineDb(); return await new Promise((res, rej) => { const r=db.transaction(OFFLINE_STORE,"readonly").objectStore(OFFLINE_STORE).get(key); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); } catch { return undefined; }
-}
-async function offlinePut(key, value) {
-  try { const db=await offlineDb(); await new Promise((res,rej)=>{const r=db.transaction(OFFLINE_STORE,"readwrite").objectStore(OFFLINE_STORE).put(value,key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);}); } catch {}
-}
-async function offlineDelete(key) {
-  try { const db=await offlineDb(); await new Promise((res,rej)=>{const r=db.transaction(OFFLINE_STORE,"readwrite").objectStore(OFFLINE_STORE).delete(key);r.onsuccess=()=>res();r.onerror=()=>rej(r.error);}); } catch {}
-}
-const isUuidTable = (table) => ["notifications","visitors","library_books","book_issues","staff_profiles"].includes(table);
-const tempId = (table) => isUuidTable(table) ? crypto.randomUUID() : -Math.floor(Date.now() + Math.random()*1000);
-const tableOf = (path) => String(path).split("?")[0].split("/").pop();
-const parseFilters = (path) => {
-  const q = path.includes("?") ? path.split("?")[1] : ""; const out=[];
-  for (const part of q.split("&")) { const [k,v]=part.split("="); if (!k||!v) continue; const dec=decodeURIComponent(v);
-    if (dec.startsWith("eq.")) out.push([k,"eq",dec.slice(3)]);
-    else if (dec.startsWith("in.(") && dec.endsWith(")")) out.push([k,"in",dec.slice(4,-1).split(",")]);
-  } return out;
-};
-const matchesFilter = (row, filters) => filters.every(([k,op,v]) => {
-  const rv=row?.[k]; if(op==="eq") return String(rv)===String(v); return v.includes(String(rv));
-});
-async function offlineRead(path) {
-  const table=tableOf(path); let rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) return null;
-  const filters=parseFilters(path); rows=filters.length?rows.filter(r=>matchesFilter(r,filters)):rows.slice();
-  const q=path.includes("?")?path.split("?")[1]:""; const order=(q.match(/order=([^&]+)/)||[])[1];
-  if(order){ const [field,dir]=order.split("."); rows.sort((a,b)=>String(a?.[field]??"").localeCompare(String(b?.[field]??""),undefined,{numeric:true})*(dir==="desc"?-1:1)); }
-  const lm=(q.match(/limit=(\d+)/)||[])[1]; if(lm) rows=rows.slice(0,Number(lm));
-  return rows;
-}
-async function offlineMergeTable(table, incoming, mode="upsert", filters=[]) {
-  let rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) rows=[];
-  const arr=Array.isArray(incoming)?incoming:[incoming];
-  const key=(r)=>r?.id!=null?`id:${r.id}`:JSON.stringify(r);
-  if(mode==="delete") rows=rows.filter(r=>!arr.some(x=>matchesFilter(r,filters.length?filters:[["id","eq",x?.id]])));
-  else for(const item of arr){ const idx=rows.findIndex(r=>key(r)===key(item)); if(idx>=0) rows[idx]={...rows[idx],...item}; else rows.push(item); }
-  await offlinePut(`table:${table}`,rows); return rows;
-}
-let offlineSyncRunning=false;
-async function syncOfflineQueue() {
-  if(offlineSyncRunning || !navigator.onLine) return; offlineSyncRunning=true;
-  try {
-    let queue=await offlineGet("syncQueue"); if(!Array.isArray(queue)||!queue.length) return;
-    const remaining=[];
-    const idMap={};
-    const replaceIds=(value)=>{ if(value==null)return value; if(typeof value==='string'&&idMap[value])return idMap[value]; if(typeof value==='number'&&idMap[String(value)])return idMap[String(value)]; if(Array.isArray(value))return value.map(replaceIds); if(typeof value==='object')return Object.fromEntries(Object.entries(value).map(([k,v])=>[k,replaceIds(v)])); return value; };
-    for(const item of queue){
-      try {
-        const path=replaceIds(item.path), options={...item.options, body:replaceIds(item.options?.body)};
-        const result=await pgFetch(path,item.token,{...options,_fromSync:true});
-        if(item.tempId && result?.[0]?.id!=null) idMap[item.tempId]=result[0].id;
-      } catch { remaining.push(item); }
-    }
-    await offlinePut("syncQueue",remaining);
-    // Replace temporary offline IDs in every cached table after successful sync.
-    for (const table of ["students","grades","attendance","payments","fee_structure","staff_profiles","classes","subjects","class_subject_teachers","timetable_entries","staff_payroll","payslips","expenditures","sms_messages","visitors","library_books","book_issues","notifications","notification_reads","marks","report_remarks","events","exams"]){
-      const rows=await offlineGet(`table:${table}`); if(!Array.isArray(rows)) continue;
-      const replaced=rows.map(r=>replaceIds(r)); await offlinePut(`table:${table}`,replaced);
-    }
-  } finally { offlineSyncRunning=false; }
-}
-window.addEventListener("online",()=>{ setTimeout(syncOfflineQueue,300); });
 
 // Sends a password-reset email via Supabase Auth. The link inside it
 // redirects back to wherever this app is currently running (Netlify, or
@@ -246,44 +160,23 @@ async function fetchStaffProfile(accessToken, userId) {
  *  straight to Postgres, so it survives reloads and sign-outs.
  * ---------------------------------------------------------------------- */
 async function pgFetch(path, token, options = {}) {
-  const method = options.method || "GET";
-  const table = tableOf(path);
-  const request = {
-    method,
-    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: options.prefer || "return=representation" },
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: options.method || "GET",
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Prefer: options.prefer || "return=representation",
+    },
     body: options.body ? JSON.stringify(options.body) : undefined,
-  };
-  if (method === "GET" && !navigator.onLine) {
-    const cached = await offlineRead(path);
-    if (cached !== null && cached !== undefined) return cached;
-    throw new Error("This data has not been downloaded yet. Connect to the internet once to make it available offline.");
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `Request failed (${res.status})`);
   }
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, request);
-    if (!res.ok) { const err=await res.json().catch(()=>({})); throw new Error(err.message || `Request failed (${res.status})`); }
-    if (res.status === 204) { if(method!=="GET") await offlineMergeTable(table,[],"upsert"); return null; }
-    const text=await res.text(); const data=text?JSON.parse(text):null;
-    if(method === "GET" && Array.isArray(data)) await offlineMergeTable(table,data);
-    return data;
-  } catch (err) {
-    if (method === "GET") { const cached=await offlineRead(path); if(cached!==null&&cached!==undefined) return cached; }
-    if (method !== "GET" && !options._fromSync) {
-      const body = options.body ? JSON.parse(JSON.stringify(options.body)) : undefined;
-      let optimistic = body ? {...body} : {};
-      const hasInsert = method === "POST";
-      if(hasInsert && optimistic.id == null) optimistic.id=tempId(table);
-      if(hasInsert) {
-        const now=new Date().toISOString(); if(optimistic.created_at==null) optimistic.created_at=now;
-        await offlineMergeTable(table,optimistic);
-      } else if(method === "PATCH") {
-        await offlineMergeTable(table,[],"upsert");
-        let rows=await offlineGet(`table:${table}`)||[]; const filters=parseFilters(path); rows=rows.map(r=>matchesFilter(r,filters)?{...r,...optimistic}:r); await offlinePut(`table:${table}`,rows);
-      } else if(method === "DELETE") { let rows=await offlineGet(`table:${table}`)||[]; const filters=parseFilters(path); rows=rows.filter(r=>!matchesFilter(r,filters)); await offlinePut(`table:${table}`,rows); }
-      const queue=await offlineGet("syncQueue")||[]; queue.push({path,token,options:{method,body,prefer:hasInsert ? "return=representation" : options.prefer},tempId:hasInsert?optimistic.id:null,queuedAt:Date.now()}); await offlinePut("syncQueue",queue);
-      return hasInsert ? [optimistic] : null;
-    }
-    throw err;
-  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
 async function fetchSchoolData(token) {
@@ -1140,7 +1033,7 @@ export default function App() {
   const handleLogin = (profile) => {
     setAuthedUser(profile);
     setView(landingViewFor(profile.role));
-    sessionStore.save(profile.refreshToken, { ...profile, accessToken: profile.accessToken });
+    sessionStore.save(profile.refreshToken);
     loadData(profile.accessToken, profile);
   };
 
@@ -1152,22 +1045,17 @@ export default function App() {
     const savedRefreshToken = sessionStore.read();
     if (!savedRefreshToken) { setRestoringSession(false); return; }
     (async () => {
-      const saved = sessionStore.read();
       try {
         const auth = await supabaseRefreshSession(savedRefreshToken);
         const profile = await fetchStaffProfile(auth.access_token, auth.user.id);
         if (cancelled) return;
         const fullProfile = { ...profile, accessToken: auth.access_token, refreshToken: auth.refresh_token };
-        setAuthedUser(fullProfile); setView(landingViewFor(fullProfile.role));
-        sessionStore.save(auth.refresh_token, { ...profile, accessToken: auth.access_token });
+        setAuthedUser(fullProfile);
+        setView(landingViewFor(fullProfile.role));
+        sessionStore.save(auth.refresh_token);
         loadData(auth.access_token, fullProfile);
       } catch (err) {
-        // Offline: reuse the last profile/token and local IndexedDB data.
-        if (!navigator.onLine && saved?.profile?.id) {
-          const fullProfile = saved.profile;
-          setAuthedUser(fullProfile); setView(landingViewFor(fullProfile.role));
-          loadData(fullProfile.accessToken, fullProfile);
-        } else { sessionStore.clear(); }
+        sessionStore.clear();
       } finally {
         if (!cancelled) setRestoringSession(false);
       }
@@ -1253,11 +1141,8 @@ export default function App() {
   // needs a privileged key this public frontend intentionally never holds.
   // Their photo is uploaded to storage right away so it's ready to attach
   // once their real profile row exists.
-  const addStaff = async (member) => {
-    const localMember = { ...member, id: tempId("staff_profiles"), subjects: member.subjects || [], pendingLogin: true };
-    setStaff((prev) => [...prev, localMember]);
-    await offlineMergeTable("staff_profiles", { id: localMember.id, name: localMember.name, role: localMember.role, subjects: (localMember.subjects || []).join(";"), class_teacher_of: localMember.classTeacherOf || null, phone: localMember.phone || "", email: localMember.email || "", photo_url: localMember.photoUrl || null, designation: localMember.designation || null });
-    return localMember;
+  const addStaff = (member) => {
+    setStaff((prev) => [...prev, { ...member, id: Math.max(0, ...prev.map((s) => s.id)) + 1 }]);
   };
 
   const addClass = async (name, fee) => {
@@ -1660,11 +1545,6 @@ export default function App() {
   };
 
   const createTeacherLogin = async (member) => {
-    if (!navigator.onLine) {
-      const localMember = await addStaff(member);
-      showToast("Staff saved offline. Their login will be created when internet is available.");
-      return localMember;
-    }
     const result = await callManageTeacher({
       action: "create", name: member.name, email: member.email, password: member.password,
       role: member.role, subjects: (member.subjects || []).join(";"), classTeacherOf: member.classTeacherOf,
@@ -5851,11 +5731,11 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
     </div>
     <div class="meta" style="text-align:center;font-weight:700;color:#222;">${examName} · ${cls} · ${term} · ${year}</div>
     <table>
-      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${s} %</th>`).join("")}<th>Total Marks (Sum)</th>${system ? "<th>Level</th>" : ""}</tr></thead>
+      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${s} %</th>`).join("")}<th>Total % (Sum)</th><th>Average %</th>${system ? "<th>Level</th>" : ""}</tr></thead>
       <tbody>
         ${analysis.perStudent.map((r) => {
-          const level = gradeForPercent(r.total, system, gradingLevels);
-          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct + "%" : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
+          const level = gradeForPercent(r.meanscore, system, gradingLevels);
+          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct + "%" : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}%</td><td>${r.meanscore == null ? "—" : Number(r.meanscore).toFixed(2)}%</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
         }).join("")}
         <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td>${system ? "<td></td>" : ""}</tr>
       </tbody>
@@ -5863,11 +5743,11 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
     <div class="summary">
       <div>Class mean score: <b style="display:inline">${Number(analysis.classMean).toFixed(2)}</b></div>
       <b>Top 3 overall</b>
-      ${analysis.top3.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("")}
+      ${analysis.top3.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("")}
       <b>Top 3 boys</b>
-      ${analysis.top3Boys.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("") || "<div>—</div>"}
+      ${analysis.top3Boys.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("") || "<div>—</div>"}
       <b>Top 3 girls</b>
-      ${analysis.top3Girls.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("") || "<div>—</div>"}
+      ${analysis.top3Girls.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("") || "<div>—</div>"}
       <div style="margin-top:20px;">Compiled by: ${classTeacher ? classTeacher.name : "________________________"} (Class Teacher)</div>
       <div style="margin-top:24px;">Signed: ___________________________</div>
     </div>
@@ -5892,7 +5772,7 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
               <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
                 <th style={{ padding: "6px 8px" }}>Pos</th><th style={{ padding: "6px 8px" }}>Name</th>
                 {subjects.map((s) => <th key={s} style={{ padding: "6px 8px" }}>{s}</th>)}
-                <th style={{ padding: "6px 8px" }}>Total Marks (Sum)</th>
+                <th style={{ padding: "6px 8px" }}>Total % (Sum)</th><th style={{ padding: "6px 8px" }}>Average %</th>
               </tr>
             </thead>
             <tbody>
@@ -5901,24 +5781,24 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
                   <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.position}</td>
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.student.name}</td>
                   {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.bySubject[s] ? `${Math.round(Number(r.bySubject[s].pct))}%` : "—"}</td>)}
-                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}</td>
+                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}%</td><td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{r.meanscore == null ? "—" : Number(r.meanscore).toFixed(2) + "%"}</td>
                 </tr>
               ))}
-              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}><td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>{subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}<td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}</b></td></tr>
+              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}><td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>{subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}<td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.perStudent.reduce((sum, r) => sum + r.total, 0) / Math.max(analysis.perStudent.length, 1)).toFixed(2)}%</b></td><td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}%</b></td></tr>
             </tbody>
           </table>
           <div className="grid grid-cols-3 gap-3 mt-4">
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 overall</div>
-              {analysis.top3.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>)}
+              {analysis.top3.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>)}
             </div>
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 boys</div>
-              {analysis.top3Boys.length ? analysis.top3Boys.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
+              {analysis.top3Boys.length ? analysis.top3Boys.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
             </div>
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 girls</div>
-              {analysis.top3Girls.length ? analysis.top3Girls.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
+              {analysis.top3Girls.length ? analysis.top3Girls.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
             </div>
           </div>
         </div>
@@ -6001,14 +5881,13 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
   const classTeacher = staff.find((s) => s.classTeacherOf === cls);
   const system = classGradingAssignment[cls] || GRADING_SYSTEMS[0];
 
-  // Build the summary numbers the report header needs: raw marks
-  // achieved/possible, points achieved/possible (via the class's grading
-  // system), and the overall level for the student's average %.
+  // Build report summary values from percentage marks. The overall level is
+  // awarded from the student average percentage using the class exam grading settings.
   const summary = useMemo(() => {
     if (!record) return null;
     const subjects = Object.keys(record.bySubject);
-    const sumScore = subjects.reduce((s, subj) => s + (record.bySubject[subj].score || 0), 0);
-    const sumOutOf = subjects.reduce((s, subj) => s + (record.bySubject[subj].outOf || 0), 0);
+    const sumPercentage = subjects.reduce((s, subj) => s + (record.bySubject[subj].pct || 0), 0);
+    const averagePercentage = record.meanscore == null ? null : Number(record.meanscore);
     const maxPts = maxPointsForSystem(system, gradingLevels);
     let sumPoints = 0;
     subjects.forEach((subj) => {
@@ -6017,8 +5896,8 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
       record.bySubject[subj].level = level ? level.level : "—";
       sumPoints += level ? level.points : 0;
     });
-    const overallLevel = gradeForPercent(record.total, system, gradingLevels);
-    return { subjects, sumScore, sumOutOf, sumPoints, maxPoints: maxPts * subjects.length, overallLevel };
+    const overallLevel = gradeForPercent(averagePercentage, system, gradingLevels);
+    return { subjects, sumPercentage, averagePercentage, sumPoints, maxPoints: maxPts * subjects.length, overallLevel };
   }, [record, system, gradingLevels]);
 
   // Points-over-time trend, built from every exam sitting on record for
@@ -6072,10 +5951,11 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
         <div style="flex:1.4; border:1px solid #ddd; border-radius:10px; padding:12px 16px; font-size:13px;">
           <div style="font-weight:800; margin-bottom:6px;">PERFORMANCE SUMMARY</div>
           <div style="display:flex; justify-content:space-between;">
-            <span>MARKS: <b>${summary.sumScore}/${summary.sumOutOf}</b></span>
+            <span>TOTAL %: <b>${Math.round(Number(summary.sumPercentage))}%</b></span>
             <span>POSITION: <b>${record.position}/${analysis.perStudent.length}</b></span>
           </div>
           <div style="display:flex; justify-content:space-between; margin-top:4px;">
+            <span>AVERAGE MARKS: <b>${summary.averagePercentage == null ? "—" : Number(summary.averagePercentage).toFixed(2)}%</b></span>
             <span>LEVEL: <b>${summary.overallLevel ? summary.overallLevel.level : "—"}</b></span>
             <span>POINTS: <b>${summary.sumPoints}/${summary.maxPoints}</b></span>
           </div>
@@ -6182,15 +6062,16 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3 mb-4">
-              <MiniStat label="Marks" value={`${Math.round(Number(summary.sumScore))}/${Math.round(Number(summary.sumOutOf))}`} />
+              <MiniStat label="Total %" value={`${Math.round(Number(summary.sumPercentage))}%`} />
               <MiniStat label="Position" value={`${record.position} of ${analysis.perStudent.length}`} />
+              <MiniStat label="Average Marks" value={summary.averagePercentage == null ? "—" : `${Number(summary.averagePercentage).toFixed(2)}%`} />
               <MiniStat label="Level" value={summary.overallLevel ? summary.overallLevel.level : "—"} />
               <MiniStat label="Points" value={`${summary.sumPoints}/${summary.maxPoints}`} />
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
                 <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
-                  <th style={{ padding: "6px 8px" }}>Subject</th><th style={{ padding: "6px 8px" }}>Marks</th><th style={{ padding: "6px 8px" }}>%</th><th style={{ padding: "6px 8px" }}>Rank</th><th style={{ padding: "6px 8px" }}>Points</th><th style={{ padding: "6px 8px" }}>Comment</th><th style={{ padding: "6px 8px" }}>Instructor</th>
+                  <th style={{ padding: "6px 8px" }}>Subject</th><th style={{ padding: "6px 8px" }}>Marks</th><th style={{ padding: "6px 8px" }}>%</th><th style={{ padding: "6px 8px" }}>Average Marks</th><th style={{ padding: "6px 8px" }}>Level</th><th style={{ padding: "6px 8px" }}>Rank</th><th style={{ padding: "6px 8px" }}>Points</th><th style={{ padding: "6px 8px" }}>Comment</th><th style={{ padding: "6px 8px" }}>Instructor</th>
                 </tr>
               </thead>
               <tbody>
@@ -6200,7 +6081,9 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
                     <tr key={subj} style={{ borderBottom: `1px solid ${LINE}` }}>
                       <td style={{ padding: "6px 8px", fontWeight: 600 }}>{subj}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.score))}/{Math.round(Number(m.outOf))}</td>
-                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.pct))}% {m.level}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.pct))}%</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{summary.averagePercentage == null ? "—" : Number(summary.averagePercentage).toFixed(2) + "%"}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.level || "—"}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.rank}/{m.outOfCount}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.points}</td>
                       <td style={{ padding: "6px 8px", color: "#6b6656" }}>{m.comment || "—"}</td>
