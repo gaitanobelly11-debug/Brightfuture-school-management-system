@@ -3200,10 +3200,15 @@ function AttendanceView({ students, attendance, markAttendance, showToast, schoo
 /* ---------------------------------------------------------------------- *
  *  GRADES
  * ---------------------------------------------------------------------- */
-function GradesView({ students, grades, setGrade, saveGrade, showToast, classes, subjects, authedUser, isAdmin, schoolSettings }) {
+function GradesView({ students, classes, exams, fetchClassMarksForExam, classGradingAssignment, gradingLevels, schoolSettings, staff, authedUser, isAdmin, showToast }) {
   const lockedClass = !isAdmin ? authedUser.classTeacherOf : null;
-  const [cls, setCls] = useState(lockedClass || classes[0]);
-  const [subject, setSubject] = useState(subjects[0]);
+  const [cls, setCls] = useState(lockedClass || classes[0] || "");
+  const [analysis, setAnalysis] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  const latestExam = exams && exams.length ? exams[exams.length - 1] : null;
+  const term = schoolSettings?.currentTerm || DEFAULT_TERM;
+  const year = String(new Date().getFullYear());
   const roster = students.filter((s) => s.class === cls);
 
   if (!isAdmin && !lockedClass) {
@@ -3214,68 +3219,49 @@ function GradesView({ students, grades, setGrade, saveGrade, showToast, classes,
     );
   }
 
-  const scoreFor = (studentId) => {
-    const g = grades.find((g) => g.studentId === studentId && g.subject === subject);
-    return g ? g.score : "";
-  };
-
-  const classAvg = useMemo(() => {
-    const scores = roster.map((s) => grades.find((g) => g.studentId === s.id && g.subject === subject)?.score).filter((x) => x != null);
-    return scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
-  }, [roster, grades, subject]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!cls || !latestExam) { setAnalysis(null); return; }
+    setLoading(true);
+    fetchClassMarksForExam({ studentClass: cls, term, year, examName: latestExam })
+      .then((rows) => { if (!cancelled) setAnalysis(computeAnalysis(rows, students.filter((s) => s.class === cls))); })
+      .catch((err) => { if (!cancelled) showToast(err.message || "Couldn't load grades"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [cls, latestExam, term, year]);
 
   return (
-    <div className="px-7 py-6" style={{ maxWidth: 900 }}>
+    <div className="px-7 py-6" style={{ maxWidth: 980 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Grades</h2>
-      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 10 }}>{schoolSettings?.currentTerm || DEFAULT_TERM} scores{lockedClass ? ` for ${lockedClass}` : " by class"} and subject — CBC performance bands.</p>
-      <div className="flex items-center gap-3 mb-4" style={{ fontSize: 11, color: "#8a8474" }}>
-        {["EE", "ME", "AE", "BE"].map((code) => (
-          <span key={code} className="flex items-center gap-1.5">
-            <span style={{ width: 8, height: 8, borderRadius: "50%", background: gradeColor(code), display: "inline-block" }} />
-            {code} — {gradeLabel(code)}
-          </span>
-        ))}
-      </div>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 14 }}>
+        {latestExam ? <>Results from the latest exam — <b>{latestExam}</b> ({term}, {year}).</> : "No exam has been set up yet."}
+      </p>
 
-      <div className="flex items-center gap-3 mb-4">
-        {lockedClass ? (
-          <span style={{ ...inputStyle, width: 160, display: "inline-flex", alignItems: "center", background: "#EFE9D8", fontWeight: 600 }}>{lockedClass}</span>
-        ) : (
-          <select value={cls} onChange={(e) => setCls(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 160 }}>
+      {!lockedClass && (
+        <div className="flex items-center gap-3 mb-4">
+          <select value={cls} onChange={(e) => setCls(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 180 }}>
             {classes.map((c) => <option key={c}>{c}</option>)}
           </select>
-        )}
-        <select value={subject} onChange={(e) => setSubject(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
-          {subjects.map((s) => <option key={s}>{s}</option>)}
-        </select>
-        <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 600, color: "#6b6656" }}>Class average: <span style={{ fontFamily: MONO_FONT }}>{classAvg}%</span></span>
-      </div>
-
-      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-          <span>Student</span><span>Score</span><span>Grade</span>
         </div>
-        {roster.map((s) => {
-          const score = scoreFor(s.id);
-          const letter = score !== "" ? gradeLetter(Number(score)) : null;
-          return (
-            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr", padding: "8px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
-              <span style={{ fontWeight: 600 }}>{s.name}</span>
-              <input
-                type="number" min={0} max={100} value={score}
-                onChange={(e) => {
-                  const v = e.target.value === "" ? "" : Math.max(0, Math.min(100, Number(e.target.value)));
-                  setGrade(s.id, subject, v === "" ? 0 : v);
-                }}
-                onBlur={() => { saveGrade(s.id, subject, Number(scoreFor(s.id)) || 0); showToast(`Saved ${s.name}'s ${subject} score`); }}
-                className="focus-ring"
-                style={{ width: 70, padding: "5px 8px", borderRadius: 7, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12.5 }}
-              />
-              {letter && <span title={gradeLabel(letter)} style={{ width: 34, textAlign: "center", fontSize: 11, fontWeight: 700, color: gradeColor(letter), border: `1px solid ${gradeColor(letter)}`, borderRadius: 6, padding: "2px 0" }}>{letter}</span>}
-            </div>
-          );
-        })}
-      </div>
+      )}
+
+      {!latestExam ? (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20, fontSize: 13, color: "#7A7568" }}>
+          No exam has been unlocked yet — ask the Head Teacher to set one up under Exams &gt; Set Up, then enter marks there.
+        </div>
+      ) : loading ? (
+        <div style={{ fontSize: 13, color: "#7A7568", padding: "20px 0" }}>Loading…</div>
+      ) : !analysis || analysis.perStudent.length === 0 ? (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20, fontSize: 13, color: "#7A7568" }}>
+          Marks haven't been entered yet for {latestExam}{lockedClass ? ` (${lockedClass})` : ""} — enter them under Exams &gt; Enter Marks.
+        </div>
+      ) : (
+        <MarkListAnalysis
+          analysis={analysis} cls={cls} term={term} year={year} examName={latestExam}
+          schoolSettings={schoolSettings} staff={staff}
+          system={classGradingAssignment[cls] || GRADING_SYSTEMS[0]} gradingLevels={gradingLevels}
+        />
+      )}
     </div>
   );
 }
