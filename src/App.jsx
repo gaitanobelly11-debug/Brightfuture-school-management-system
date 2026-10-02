@@ -945,6 +945,7 @@ export default function App() {
   const [libraryBooks, setLibraryBooks] = useState([]);
   const [bookIssues, setBookIssues] = useState([]);
   const [view, setView] = useState("dashboard");
+  const [attendanceLanding, setAttendanceLanding] = useState("students");
   const [toast, setToast] = useState(null);
   const [authedUser, setAuthedUser] = useState(null);
   const [dataLoading, setDataLoading] = useState(false);
@@ -1613,6 +1614,8 @@ export default function App() {
     recordExpenditure, deleteExpenditure, schoolDays,
     smsMessages, sendBulkSms, sendBatchSms, recordSmsMessage,
     classes, subjects, schoolSettings, authedUser, isAdmin, setView,
+    attendanceLanding,
+    goToStaffAttendance: () => { setAttendanceLanding("staff"); setView("attendance"); },
     exams, events, notifications, gradingLevels, classGradingAssignment, myAttendanceToday,
     timetableAssignments, timetableSettings, timetableEntries,
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
@@ -2107,7 +2110,7 @@ function StatCard({ label, value, icon: Icon, tone, sub }) {
 /* ---------------------------------------------------------------------- *
  *  DASHBOARD
  * ---------------------------------------------------------------------- */
-function Dashboard({ students, staff, attendance, grades, payments, feeStructure, schoolDays, classes, schoolSettings, events, notifications, setView }) {
+function Dashboard({ students, staff, attendance, grades, payments, feeStructure, schoolDays, classes, schoolSettings, events, notifications, setView, goToStaffAttendance }) {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const showArrivalReminder = nowMinutes >= 8 * 60;
@@ -2151,7 +2154,7 @@ function Dashboard({ students, staff, attendance, grades, payments, feeStructure
           <span style={{ fontSize: 13, color: "#6b5730" }}>
             {showDepartureReminder ? "Please confirm today's staff departure times." : "Please confirm today's staff arrival times."}
           </span>
-          <button onClick={() => setView("hr")} className="focus-ring" style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={goToStaffAttendance} className="focus-ring" style={{ marginLeft: "auto", padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
             Review Attendance
           </button>
         </div>
@@ -3093,11 +3096,11 @@ function Field({ label, children }) {
 /* ---------------------------------------------------------------------- *
  *  ATTENDANCE
  * ---------------------------------------------------------------------- */
-function AttendanceView({ students, attendance, markAttendance, showToast, schoolDays, classes, authedUser, isAdmin, staff, fetchStaffAttendanceForDate, saveAttendanceReason, sendNotification, schoolSettings }) {
+function AttendanceView({ students, attendance, markAttendance, showToast, schoolDays, classes, authedUser, isAdmin, staff, fetchStaffAttendanceForDate, saveAttendanceReason, sendNotification, schoolSettings, attendanceLanding }) {
   // A Class Teacher only ever sees/marks their own class; the picker is
   // locked to it instead of hidden, so it's clear which class this is.
   const lockedClass = !isAdmin ? authedUser.classTeacherOf : null;
-  const [subTab, setSubTab] = useState("students");
+  const [subTab, setSubTab] = useState(isAdmin && attendanceLanding === "staff" ? "staff" : "students");
   const [cls, setCls] = useState(lockedClass || classes[0]);
   const [date, setDate] = useState(schoolDays[schoolDays.length - 1]);
   const roster = students.filter((s) => s.class === cls);
