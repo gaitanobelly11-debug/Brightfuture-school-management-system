@@ -1027,7 +1027,7 @@ export default function App() {
     if (role === "Receptionist") return "frontoffice";
     if (role === "Librarian") return "library";
     if (role === "Subordinate Staff") return "notifications";
-    return "attendance"; // Class Teacher, Subject Teacher
+    return "dashboard"; // Class Teacher, Subject Teacher
   };
 
   const handleLogin = (profile) => {
@@ -1708,6 +1708,7 @@ export default function App() {
             {!dataLoading && !dataError && (
               <>
                 {view === "dashboard" && isAdmin && <Dashboard {...ctx} />}
+                {view === "dashboard" && !isAdmin && ["Class Teacher", "Subject Teacher"].includes(authedUser?.role) && <TeacherDashboard {...ctx} />}
                 {view === "students" && isAdmin && <StudentsView {...ctx} />}
                 {view === "attendance" && <AttendanceView {...ctx} />}
                 {view === "grades" && <GradesView {...ctx} />}
@@ -1968,7 +1969,7 @@ function ResetPasswordScreen({ accessToken, onDone }) {
  * ---------------------------------------------------------------------- */
 function Sidebar({ view, setView, role, menuOpen }) {
   const allItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: ADMIN_ROLES },
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher"] },
     { id: "students", label: "Students", icon: Users, roles: ADMIN_ROLES },
     { id: "attendance", label: "Attendance", icon: CalendarCheck, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "grades", label: "Grades", icon: GraduationCap, roles: [...ADMIN_ROLES, "Class Teacher"] },
@@ -2219,6 +2220,123 @@ function Dashboard({ students, staff, attendance, grades, payments, feeStructure
             {classRows.map((r) => <div key={r.class} style={{display:"grid",gridTemplateColumns:"1.3fr .8fr 1fr 1fr 1fr",padding:"11px 16px",fontSize:13,borderBottom:`1px solid ${LINE}`,alignItems:"center"}}><span style={{fontWeight:600}}>{r.class}</span><span style={{fontFamily:MONO_FONT,color:"#6b6656"}}>{r.count}</span><span style={{fontFamily:MONO_FONT,color:r.rate<85?"#a1442c":"#2f6f4a",fontWeight:600}}>{r.rate}%</span><span style={{fontFamily:MONO_FONT,color:"#6b6656"}}>{money(r.due)}</span><span style={{fontFamily:MONO_FONT}}>{money(r.paid)}</span></div>)}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- *
+ *  TEACHER DASHBOARD — landing page for Class Teacher / Subject Teacher.
+ *  Scoped to their own class where they have one; shows roster size,
+ *  today's attendance rate, upcoming events, and a short pending-activity
+ *  checklist (mark today's attendance, enter marks for the latest exam).
+ * ---------------------------------------------------------------------- */
+function TeacherDashboard({ authedUser, students, attendance, classes, events, exams, schoolDays, fetchClassMarksForExam, setView, showToast }) {
+  const myClass = authedUser?.classTeacherOf || null;
+  const roster = myClass ? students.filter((s) => s.class === myClass) : [];
+  const today = schoolDays?.[schoolDays.length - 1] || new Date().toISOString().slice(0, 10);
+  const todaysRecs = myClass ? attendance.filter((a) => a.date === today && roster.some((s) => s.id === a.studentId)) : [];
+  const presentToday = todaysRecs.filter((a) => a.status !== "Absent").length;
+  const attendanceRate = todaysRecs.length ? Math.round((presentToday / todaysRecs.length) * 100) : null;
+  const attendanceMarkedToday = todaysRecs.length > 0;
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const upcoming = (events || []).filter((e) => e.to >= todayStr).slice(0, 5);
+
+  const latestExam = exams && exams.length ? exams[exams.length - 1] : null;
+  const [examStatus, setExamStatus] = useState("checking"); // checking | pending | done | none
+
+  useEffect(() => {
+    let cancelled = false;
+    async function check() {
+      if (!latestExam) { setExamStatus("none"); return; }
+      setExamStatus("checking");
+      try {
+        if (myClass) {
+          const rows = await fetchClassMarksForExam({ studentClass: myClass, term: TERMS[1], year: EXAM_YEARS[1], examName: latestExam });
+          if (!cancelled) setExamStatus(rows.length > 0 ? "done" : "pending");
+        } else {
+          const results = await Promise.all(
+            (classes || []).map((c) => fetchClassMarksForExam({ studentClass: c, term: TERMS[1], year: EXAM_YEARS[1], examName: latestExam }).catch(() => []))
+          );
+          const mySubjects = authedUser?.subjects || [];
+          const anyMine = results.flat().some((r) => mySubjects.includes(r.subject));
+          if (!cancelled) setExamStatus(anyMine ? "done" : "pending");
+        }
+      } catch {
+        if (!cancelled) setExamStatus("pending");
+      }
+    }
+    check();
+    return () => { cancelled = true; };
+  }, [latestExam, myClass, (classes || []).join(",")]);
+
+  const pending = [];
+  if (myClass && !attendanceMarkedToday) pending.push({ label: `Mark today's attendance for ${myClass}`, view: "attendance" });
+  if (latestExam && examStatus === "pending") pending.push({ label: `Enter marks for ${latestExam}`, view: "exams" });
+
+  const cards = [
+    myClass
+      ? { label: "My class", value: myClass, sub: `${roster.length} student${roster.length === 1 ? "" : "s"}`, icon: Users, bg: "#EAF3FF", tone: "#245B91" }
+      : { label: "Subjects taught", value: (authedUser?.subjects || []).length, sub: (authedUser?.subjects || []).join(", ") || "None set", icon: BookOpen, bg: "#EAF3FF", tone: "#245B91" },
+    {
+      label: myClass ? "Attendance today" : "Attendance",
+      value: attendanceRate == null ? "—" : `${attendanceRate}%`,
+      sub: myClass ? (attendanceMarkedToday ? `As of ${today}` : "Not marked yet") : "Marked by class teachers",
+      icon: CalendarCheck, bg: "#FFF5E7", tone: attendanceRate != null && attendanceRate < 85 ? "#A1442C" : "#A1702C",
+    },
+  ];
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1000 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 21, fontWeight: 600, marginBottom: 3 }}>Welcome, {authedUser?.name?.split(" ")[0] || "there"}</h2>
+        <p style={{ fontSize: 12.5, color: "#7A7568" }}>Your class at a glance.</p>
+      </div>
+
+      <div className="dashboard-overview-grid" style={{ gridTemplateColumns: "repeat(2, minmax(0,1fr))" }}>
+        {cards.map(({ label, value, sub, icon: Icon, bg, tone }) => (
+          <div key={label} className="dashboard-info-card" style={{ background: bg }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: tone, textTransform: "uppercase", letterSpacing: 0.35 }}>{label}</span>
+              <span style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,.72)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon size={17} color={tone} /></span>
+            </div>
+            <div style={{ fontFamily: MONO_FONT, fontSize: 22, fontWeight: 700, color: INK }}>{value}</div>
+            <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#FFF7EA", marginTop: 14, marginBottom: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Things that still need your attention</div></div>
+          <AlertTriangle size={18} color="#A1702C" />
+        </div>
+        {examStatus === "checking" && pending.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "#7A7568", padding: "6px 0" }}>Checking…</div>
+        ) : pending.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>You're all caught up — nothing pending right now.</div>
+        ) : (
+          pending.map((p) => (
+            <div key={p.label} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px", marginBottom: 7 }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>{p.label}</span>
+              <button onClick={() => setView(p.view)} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Do it now</button>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#EEF5FF" }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#245B91", textTransform: "uppercase" }}>Upcoming Events</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>What is coming up next</div></div>
+          <CalendarDays size={18} color="#245B91" />
+        </div>
+        {upcoming.length ? upcoming.map((e) => (
+          <div key={e.id} className="dashboard-event-card" style={{ background: "rgba(255,255,255,.72)", marginBottom: 8 }}>
+            <div className="flex items-start justify-between gap-3"><div><b style={{ fontSize: 13 }}>{e.name}</b>{e.location ? <div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>{e.location}</div> : null}</div><span style={{ fontSize: 10, fontWeight: 700, color: e.type === "Exam" ? ACCENT : "#245B91", background: "#fff", padding: "4px 7px", borderRadius: 999 }}>{e.type}</span></div>
+            <div style={{ fontSize: 11, color: "#7A7568", marginTop: 8 }}>{e.from}{e.to && e.to !== e.from ? ` to ${e.to}` : ""}</div>
+          </div>
+        )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>No upcoming events.</div>}
       </div>
     </div>
   );
@@ -5731,11 +5849,11 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
     </div>
     <div class="meta" style="text-align:center;font-weight:700;color:#222;">${examName} · ${cls} · ${term} · ${year}</div>
     <table>
-      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${s} %</th>`).join("")}<th>Total % (Sum)</th><th>Average %</th>${system ? "<th>Level</th>" : ""}</tr></thead>
+      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${s} %</th>`).join("")}<th>Total Marks (Sum)</th>${system ? "<th>Level</th>" : ""}</tr></thead>
       <tbody>
         ${analysis.perStudent.map((r) => {
-          const level = gradeForPercent(r.meanscore, system, gradingLevels);
-          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct + "%" : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}%</td><td>${r.meanscore == null ? "—" : Number(r.meanscore).toFixed(2)}%</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
+          const level = gradeForPercent(r.total, system, gradingLevels);
+          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct + "%" : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
         }).join("")}
         <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td>${system ? "<td></td>" : ""}</tr>
       </tbody>
@@ -5743,11 +5861,11 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
     <div class="summary">
       <div>Class mean score: <b style="display:inline">${Number(analysis.classMean).toFixed(2)}</b></div>
       <b>Top 3 overall</b>
-      ${analysis.top3.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("")}
+      ${analysis.top3.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("")}
       <b>Top 3 boys</b>
-      ${analysis.top3Boys.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("") || "<div>—</div>"}
+      ${analysis.top3Boys.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("") || "<div>—</div>"}
       <b>Top 3 girls</b>
-      ${analysis.top3Girls.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}%</div>`).join("") || "<div>—</div>"}
+      ${analysis.top3Girls.map((r, i) => `<div>${i + 1}. ${r.student.name} — ${Math.round(Number(r.total))}</div>`).join("") || "<div>—</div>"}
       <div style="margin-top:20px;">Compiled by: ${classTeacher ? classTeacher.name : "________________________"} (Class Teacher)</div>
       <div style="margin-top:24px;">Signed: ___________________________</div>
     </div>
@@ -5772,7 +5890,7 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
               <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
                 <th style={{ padding: "6px 8px" }}>Pos</th><th style={{ padding: "6px 8px" }}>Name</th>
                 {subjects.map((s) => <th key={s} style={{ padding: "6px 8px" }}>{s}</th>)}
-                <th style={{ padding: "6px 8px" }}>Total % (Sum)</th><th style={{ padding: "6px 8px" }}>Average %</th>
+                <th style={{ padding: "6px 8px" }}>Total Marks (Sum)</th>
               </tr>
             </thead>
             <tbody>
@@ -5781,24 +5899,24 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
                   <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.position}</td>
                   <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.student.name}</td>
                   {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.bySubject[s] ? `${Math.round(Number(r.bySubject[s].pct))}%` : "—"}</td>)}
-                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}%</td><td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{r.meanscore == null ? "—" : Number(r.meanscore).toFixed(2) + "%"}</td>
+                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}</td>
                 </tr>
               ))}
-              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}><td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>{subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}<td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.perStudent.reduce((sum, r) => sum + r.total, 0) / Math.max(analysis.perStudent.length, 1)).toFixed(2)}%</b></td><td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}%</b></td></tr>
+              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}><td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>{subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}<td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}</b></td></tr>
             </tbody>
           </table>
           <div className="grid grid-cols-3 gap-3 mt-4">
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 overall</div>
-              {analysis.top3.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>)}
+              {analysis.top3.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>)}
             </div>
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 boys</div>
-              {analysis.top3Boys.length ? analysis.top3Boys.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
+              {analysis.top3Boys.length ? analysis.top3Boys.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
             </div>
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 girls</div>
-              {analysis.top3Girls.length ? analysis.top3Girls.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {Math.round(Number(r.total))}%</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
+              {analysis.top3Girls.length ? analysis.top3Girls.map((r, i) => <div key={r.student.id} style={{ fontSize: 12.5 }}>{i + 1}. {r.student.name} — {r.total}</div>) : <span style={{ fontSize: 12, color: "#c4bda7" }}>—</span>}
             </div>
           </div>
         </div>
@@ -5881,13 +5999,14 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
   const classTeacher = staff.find((s) => s.classTeacherOf === cls);
   const system = classGradingAssignment[cls] || GRADING_SYSTEMS[0];
 
-  // Build report summary values from percentage marks. The overall level is
-  // awarded from the student average percentage using the class exam grading settings.
+  // Build the summary numbers the report header needs: raw marks
+  // achieved/possible, points achieved/possible (via the class's grading
+  // system), and the overall level for the student's average %.
   const summary = useMemo(() => {
     if (!record) return null;
     const subjects = Object.keys(record.bySubject);
-    const sumPercentage = subjects.reduce((s, subj) => s + (record.bySubject[subj].pct || 0), 0);
-    const averagePercentage = record.meanscore == null ? null : Number(record.meanscore);
+    const sumScore = subjects.reduce((s, subj) => s + (record.bySubject[subj].score || 0), 0);
+    const sumOutOf = subjects.reduce((s, subj) => s + (record.bySubject[subj].outOf || 0), 0);
     const maxPts = maxPointsForSystem(system, gradingLevels);
     let sumPoints = 0;
     subjects.forEach((subj) => {
@@ -5896,8 +6015,8 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
       record.bySubject[subj].level = level ? level.level : "—";
       sumPoints += level ? level.points : 0;
     });
-    const overallLevel = gradeForPercent(averagePercentage, system, gradingLevels);
-    return { subjects, sumPercentage, averagePercentage, sumPoints, maxPoints: maxPts * subjects.length, overallLevel };
+    const overallLevel = gradeForPercent(record.total, system, gradingLevels);
+    return { subjects, sumScore, sumOutOf, sumPoints, maxPoints: maxPts * subjects.length, overallLevel };
   }, [record, system, gradingLevels]);
 
   // Points-over-time trend, built from every exam sitting on record for
@@ -5951,11 +6070,10 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
         <div style="flex:1.4; border:1px solid #ddd; border-radius:10px; padding:12px 16px; font-size:13px;">
           <div style="font-weight:800; margin-bottom:6px;">PERFORMANCE SUMMARY</div>
           <div style="display:flex; justify-content:space-between;">
-            <span>TOTAL %: <b>${Math.round(Number(summary.sumPercentage))}%</b></span>
+            <span>MARKS: <b>${summary.sumScore}/${summary.sumOutOf}</b></span>
             <span>POSITION: <b>${record.position}/${analysis.perStudent.length}</b></span>
           </div>
           <div style="display:flex; justify-content:space-between; margin-top:4px;">
-            <span>AVERAGE MARKS: <b>${summary.averagePercentage == null ? "—" : Number(summary.averagePercentage).toFixed(2)}%</b></span>
             <span>LEVEL: <b>${summary.overallLevel ? summary.overallLevel.level : "—"}</b></span>
             <span>POINTS: <b>${summary.sumPoints}/${summary.maxPoints}</b></span>
           </div>
@@ -6062,16 +6180,15 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3 mb-4">
-              <MiniStat label="Total %" value={`${Math.round(Number(summary.sumPercentage))}%`} />
+              <MiniStat label="Marks" value={`${Math.round(Number(summary.sumScore))}/${Math.round(Number(summary.sumOutOf))}`} />
               <MiniStat label="Position" value={`${record.position} of ${analysis.perStudent.length}`} />
-              <MiniStat label="Average Marks" value={summary.averagePercentage == null ? "—" : `${Number(summary.averagePercentage).toFixed(2)}%`} />
               <MiniStat label="Level" value={summary.overallLevel ? summary.overallLevel.level : "—"} />
               <MiniStat label="Points" value={`${summary.sumPoints}/${summary.maxPoints}`} />
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
                 <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
-                  <th style={{ padding: "6px 8px" }}>Subject</th><th style={{ padding: "6px 8px" }}>Marks</th><th style={{ padding: "6px 8px" }}>%</th><th style={{ padding: "6px 8px" }}>Average Marks</th><th style={{ padding: "6px 8px" }}>Level</th><th style={{ padding: "6px 8px" }}>Rank</th><th style={{ padding: "6px 8px" }}>Points</th><th style={{ padding: "6px 8px" }}>Comment</th><th style={{ padding: "6px 8px" }}>Instructor</th>
+                  <th style={{ padding: "6px 8px" }}>Subject</th><th style={{ padding: "6px 8px" }}>Marks</th><th style={{ padding: "6px 8px" }}>%</th><th style={{ padding: "6px 8px" }}>Rank</th><th style={{ padding: "6px 8px" }}>Points</th><th style={{ padding: "6px 8px" }}>Comment</th><th style={{ padding: "6px 8px" }}>Instructor</th>
                 </tr>
               </thead>
               <tbody>
@@ -6081,9 +6198,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
                     <tr key={subj} style={{ borderBottom: `1px solid ${LINE}` }}>
                       <td style={{ padding: "6px 8px", fontWeight: 600 }}>{subj}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.score))}/{Math.round(Number(m.outOf))}</td>
-                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.pct))}%</td>
-                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{summary.averagePercentage == null ? "—" : Number(summary.averagePercentage).toFixed(2) + "%"}</td>
-                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.level || "—"}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{Math.round(Number(m.pct))}% {m.level}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.rank}/{m.outOfCount}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.points}</td>
                       <td style={{ padding: "6px 8px", color: "#6b6656" }}>{m.comment || "—"}</td>
