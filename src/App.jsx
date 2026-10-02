@@ -1022,12 +1022,8 @@ export default function App() {
   // A Class Teacher doesn't have a Dashboard/Students/Fees/Staff/Setup tab,
   // so send them straight to Attendance instead of a view they can't see.
   const landingViewFor = (role) => {
-    if (isAdminRole(role)) return "dashboard";
-    if (role === "Clerk") return "fees";
-    if (role === "Receptionist") return "frontoffice";
-    if (role === "Librarian") return "library";
     if (role === "Subordinate Staff") return "notifications";
-    return "dashboard"; // Class Teacher, Subject Teacher
+    return "dashboard"; // everyone else now has a role-appropriate dashboard
   };
 
   const handleLogin = (profile) => {
@@ -1708,7 +1704,10 @@ export default function App() {
             {!dataLoading && !dataError && (
               <>
                 {view === "dashboard" && isAdmin && <Dashboard {...ctx} />}
-                {view === "dashboard" && !isAdmin && ["Class Teacher", "Subject Teacher"].includes(authedUser?.role) && <TeacherDashboard {...ctx} />}
+                {view === "dashboard" && ["Class Teacher", "Subject Teacher"].includes(authedUser?.role) && <TeacherDashboard {...ctx} />}
+                {view === "dashboard" && authedUser?.role === "Clerk" && <ClerkDashboard {...ctx} />}
+                {view === "dashboard" && authedUser?.role === "Receptionist" && <ReceptionistDashboard {...ctx} />}
+                {view === "dashboard" && authedUser?.role === "Librarian" && <LibrarianDashboard {...ctx} />}
                 {view === "students" && isAdmin && <StudentsView {...ctx} />}
                 {view === "attendance" && <AttendanceView {...ctx} />}
                 {view === "grades" && <GradesView {...ctx} />}
@@ -1969,7 +1968,7 @@ function ResetPasswordScreen({ accessToken, onDone }) {
  * ---------------------------------------------------------------------- */
 function Sidebar({ view, setView, role, menuOpen }) {
   const allItems = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher"] },
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher", "Clerk", "Receptionist", "Librarian"] },
     { id: "students", label: "Students", icon: Users, roles: ADMIN_ROLES },
     { id: "attendance", label: "Attendance", icon: CalendarCheck, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "grades", label: "Grades", icon: GraduationCap, roles: [...ADMIN_ROLES, "Class Teacher"] },
@@ -2337,6 +2336,198 @@ function TeacherDashboard({ authedUser, students, attendance, classes, events, e
             <div style={{ fontSize: 11, color: "#7A7568", marginTop: 8 }}>{e.from}{e.to && e.to !== e.from ? ` to ${e.to}` : ""}</div>
           </div>
         )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>No upcoming events.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- *
+ *  CLERK DASHBOARD — fees collection + HR/payroll at a glance
+ * ---------------------------------------------------------------------- */
+function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll, payslips, setView }) {
+  const totalDue = students.reduce((s, st) => s + (feeStructure[st.class] || 0), 0);
+  const schoolFeesPayments = payments.filter((p) => p.account === "School Fees");
+  const totalPaid = schoolFeesPayments.reduce((s, p) => s + p.amount, 0);
+  const outstanding = totalDue - totalPaid;
+  const recentPayments = [...payments].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
+
+  const now = new Date();
+  const month = now.getMonth() + 1;
+  const year = now.getFullYear();
+  const eligibleStaff = staff.filter((s) => staffPayroll.some((p) => p.staffId === s.id && p.basicSalary > 0));
+  const generatedThisMonth = eligibleStaff.filter((s) => payslips.some((p) => p.staffId === s.id && p.month === month && p.year === year));
+  const payrollPending = eligibleStaff.length - generatedThisMonth.length;
+  const monthLabel = now.toLocaleString("en-GB", { month: "long" });
+
+  const cards = [
+    { label: "Fees collected", value: money(totalPaid), sub: `of ${money(totalDue)} due`, icon: Wallet, bg: "#EEF8F0", tone: "#2F6F4A" },
+    { label: "Fees outstanding", value: money(outstanding), sub: outstanding > 0 ? "Follow up with guardians" : "All caught up", icon: AlertTriangle, bg: "#F8ECF0", tone: outstanding > 0 ? "#A1442C" : "#2F6F4A" },
+    { label: "Payroll this month", value: `${generatedThisMonth.length}/${eligibleStaff.length}`, sub: `Payslips generated for ${monthLabel}`, icon: UserCheck, bg: "#EAF3FF", tone: payrollPending > 0 ? "#A1702C" : "#2F6F4A" },
+  ];
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1040 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 21, fontWeight: 600, marginBottom: 3 }}>Finance & HR Overview</h2>
+        <p style={{ fontSize: 12.5, color: "#7A7568" }}>Fees collection and payroll at a glance.</p>
+      </div>
+
+      <div className="dashboard-overview-grid">
+        {cards.map(({ label, value, sub, icon: Icon, bg, tone }) => (
+          <div key={label} className="dashboard-info-card" style={{ background: bg }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: tone, textTransform: "uppercase", letterSpacing: 0.35 }}>{label}</span>
+              <span style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,.72)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon size={17} color={tone} /></span>
+            </div>
+            <div style={{ fontFamily: MONO_FONT, fontSize: 22, fontWeight: 700, color: INK }}>{value}</div>
+            <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#FFF7EA", marginTop: 14, marginBottom: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Things that still need your attention</div></div>
+          <AlertTriangle size={18} color="#A1702C" />
+        </div>
+        {payrollPending > 0 ? (
+          <div className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px" }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Run payroll for {payrollPending} staff member{payrollPending === 1 ? "" : "s"} — {monthLabel}</span>
+            <button onClick={() => setView("hr")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Do it now</button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>You're all caught up — nothing pending right now.</div>
+        )}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#EEF8F0" }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#2F6F4A", textTransform: "uppercase" }}>Recent Payments</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Latest fee payments recorded</div></div>
+          <Wallet size={18} color="#2F6F4A" />
+        </div>
+        {recentPayments.length ? recentPayments.map((p) => (
+          <div key={p.id} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.72)", borderRadius: 10, padding: "9px 12px", marginBottom: 7 }}>
+            <div><b style={{ fontSize: 13 }}>{money(p.amount)}</b><span style={{ fontSize: 11, color: "#6b6656", marginLeft: 8 }}>{p.account}</span></div>
+            <span style={{ fontSize: 11, fontFamily: MONO_FONT, color: "#7A7568" }}>{p.date}</span>
+          </div>
+        )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>No payments recorded yet.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- *
+ *  LIBRARIAN DASHBOARD — catalogue size, issued/overdue at a glance
+ * ---------------------------------------------------------------------- */
+function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const totalCopies = libraryBooks.reduce((s, b) => s + b.totalCopies, 0);
+  const outstanding = bookIssues.filter((i) => i.status !== "Returned");
+  const overdue = outstanding.filter((i) => i.dueDate && i.dueDate < todayStr);
+  const bookTitle = (id) => libraryBooks.find((b) => b.id === id)?.title || "—";
+
+  const cards = [
+    { label: "Books in catalogue", value: libraryBooks.length, sub: `${totalCopies} total copies`, icon: Library, bg: "#EAF3FF", tone: "#245B91" },
+    { label: "Currently issued", value: outstanding.length, sub: "Not yet returned", icon: BookOpen, bg: "#F6F0FF", tone: "#6B4FA1" },
+    { label: "Overdue", value: overdue.length, sub: overdue.length ? "Needs follow-up" : "All on time", icon: AlertTriangle, bg: "#F8ECF0", tone: overdue.length ? "#A1442C" : "#2F6F4A" },
+  ];
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1040 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 21, fontWeight: 600, marginBottom: 3 }}>Library Overview</h2>
+        <p style={{ fontSize: 12.5, color: "#7A7568" }}>Catalogue, issues, and returns at a glance.</p>
+      </div>
+
+      <div className="dashboard-overview-grid">
+        {cards.map(({ label, value, sub, icon: Icon, bg, tone }) => (
+          <div key={label} className="dashboard-info-card" style={{ background: bg }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: tone, textTransform: "uppercase", letterSpacing: 0.35 }}>{label}</span>
+              <span style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,.72)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon size={17} color={tone} /></span>
+            </div>
+            <div style={{ fontFamily: MONO_FONT, fontSize: 22, fontWeight: 700, color: INK }}>{value}</div>
+            <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#FFF7EA", marginTop: 14, marginBottom: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Books that need following up</div></div>
+          <AlertTriangle size={18} color="#A1702C" />
+        </div>
+        {overdue.length ? overdue.slice(0, 6).map((i) => (
+          <div key={i.id} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px", marginBottom: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{bookTitle(i.bookId)} — {i.borrowerName}, due {i.dueDate}</span>
+            <button onClick={() => setView("library")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Review</button>
+          </div>
+        )) : <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>No overdue books — nothing pending right now.</div>}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#F6F0FF" }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#6B4FA1", textTransform: "uppercase" }}>Currently Issued</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Books out on loan</div></div>
+          <BookOpen size={18} color="#6B4FA1" />
+        </div>
+        {outstanding.length ? outstanding.slice(0, 6).map((i) => (
+          <div key={i.id} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.72)", borderRadius: 10, padding: "9px 12px", marginBottom: 7 }}>
+            <div><b style={{ fontSize: 13 }}>{bookTitle(i.bookId)}</b><span style={{ fontSize: 11, color: "#6b6656", marginLeft: 8 }}>{i.borrowerName}</span></div>
+            <span style={{ fontSize: 11, fontFamily: MONO_FONT, color: "#7A7568" }}>due {i.dueDate || "—"}</span>
+          </div>
+        )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>Nothing out on loan right now.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- *
+ *  RECEPTIONIST DASHBOARD — today's visitor traffic at a glance
+ * ---------------------------------------------------------------------- */
+function ReceptionistDashboard({ visitors, setView }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const todaysVisitors = visitors.filter((v) => v.date === todayStr);
+  const recent = [...visitors].slice(0, 6);
+
+  const cards = [
+    { label: "Visitors today", value: todaysVisitors.length, sub: todayStr, icon: Contact, bg: "#EAF3FF", tone: "#245B91" },
+    { label: "Total logged", value: visitors.length, sub: "All time", icon: Users, bg: "#EEF8F0", tone: "#2F6F4A" },
+  ];
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1000 }}>
+      <div className="flex items-start justify-between" style={{ marginBottom: 18 }}>
+        <div>
+          <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 21, fontWeight: 600, marginBottom: 3 }}>Front Office Overview</h2>
+          <p style={{ fontSize: 12.5, color: "#7A7568" }}>Today's visitor traffic at a glance.</p>
+        </div>
+        <button onClick={() => setView("frontoffice")} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 }}>Log a Visitor</button>
+      </div>
+
+      <div className="dashboard-overview-grid" style={{ gridTemplateColumns: "repeat(2, minmax(0,1fr))" }}>
+        {cards.map(({ label, value, sub, icon: Icon, bg, tone }) => (
+          <div key={label} className="dashboard-info-card" style={{ background: bg }}>
+            <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: tone, textTransform: "uppercase", letterSpacing: 0.35 }}>{label}</span>
+              <span style={{ width: 34, height: 34, borderRadius: 10, background: "rgba(255,255,255,.72)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon size={17} color={tone} /></span>
+            </div>
+            <div style={{ fontFamily: MONO_FONT, fontSize: 22, fontWeight: 700, color: INK }}>{value}</div>
+            <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#EEF5FF", marginTop: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#245B91", textTransform: "uppercase" }}>Recent Visitors</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Latest entries in the log</div></div>
+          <Contact size={18} color="#245B91" />
+        </div>
+        {recent.length ? recent.map((v) => (
+          <div key={v.id} className="dashboard-event-card" style={{ background: "rgba(255,255,255,.72)", marginBottom: 8 }}>
+            <div className="flex items-start justify-between gap-3"><div><b style={{ fontSize: 13 }}>{v.name}</b><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>{v.reason}</div></div><span style={{ fontSize: 10, fontWeight: 700, color: "#245B91", background: "#fff", padding: "4px 7px", borderRadius: 999 }}>{v.date}</span></div>
+            {v.comments ? <div style={{ fontSize: 11, color: "#7A7568", marginTop: 8 }}>{v.comments}</div> : null}
+          </div>
+        )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>No visitors logged yet.</div>}
       </div>
     </div>
   );
