@@ -6035,9 +6035,9 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
   const buildHtml = () => `
     <div class="header" style="justify-content:center;text-align:center;">
       ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
-      <div><div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
+      <div><div class="school-name" style="font-size:22px;">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
     </div>
-    <div class="meta" style="text-align:center;font-weight:700;color:#222;">Mark List — ${examName} · ${cls} · ${term} · ${year}</div>
+    <div class="meta" style="text-align:center;font-weight:700;color:#222;font-size:22px;">Mark List — ${examName} · ${cls} · ${term} · ${year}</div>
     <table>
       <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${subjectAbbr(s)}</th>`).join("")}<th>Total %</th><th>Average %</th>${system ? "<th>Level</th>" : ""}</tr></thead>
       <tbody>
@@ -6273,7 +6273,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
         <div style="flex:1.4; border:1px solid #ddd; border-radius:10px; padding:12px 16px; font-size:13px;">
           <div style="font-weight:800; margin-bottom:6px;">PERFORMANCE SUMMARY</div>
           <div style="display:flex; justify-content:space-between;">
-            <span>MARKS: <b>${summary.sumScore}/${summary.sumOutOf}</b></span>
+            <span>TOTAL %: <b>${Math.round(Number(record.total))}%</b></span>
             <span>POSITION: <b>${record.position}/${analysis.perStudent.length}</b></span>
           </div>
           <div style="display:flex; justify-content:space-between; margin-top:4px;">
@@ -6383,7 +6383,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3 mb-4">
-              <MiniStat label="Marks" value={`${Math.round(Number(summary.sumScore))}/${Math.round(Number(summary.sumOutOf))}`} />
+              <MiniStat label="Total %" value={`${Math.round(Number(record.total))}%`} />
               <MiniStat label="Position" value={`${record.position} of ${analysis.perStudent.length}`} />
               <MiniStat label="Level" value={summary.overallLevel ? summary.overallLevel.level : "—"} />
               <MiniStat label="Points" value={`${summary.sumPoints}/${summary.maxPoints}`} />
