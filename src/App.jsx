@@ -5115,26 +5115,31 @@ function computeAnalysis(markRows, roster) {
   const perStudent = roster.map((s) => {
     const rows = markRows.filter((m) => m.studentId === s.id);
     const bySubject = {};
-    let total = 0;
-    let percentageCount = 0;
+    let sumScore = 0, sumOutOf = 0, sumPct = 0, percentageCount = 0;
     rows.forEach((r) => {
       if (r.score == null) return;
       const score = Number(r.score) || 0;
       const outOf = Number(r.outOf) || 0;
       const pct = outOf ? Math.round((score / outOf) * 100) : 0;
       bySubject[r.subject] = { score: Math.round(score), outOf: Math.round(outOf), pct, comment: r.comment };
-      total += pct;
+      sumScore += score;
+      sumOutOf += outOf;
+      sumPct += pct;
       percentageCount += 1;
       bySubjectAll[r.subject] = bySubjectAll[r.subject] || [];
       bySubjectAll[r.subject].push(pct);
     });
-    // Total Marks is the sum of all subject percentages.
-    // Meanscore is the average of those subject percentages.
-    const meanscore = percentageCount ? Math.round((total / percentageCount) * 100) / 100 : null;
-    return { student: s, bySubject, total, meanscore };
-  }).filter((r) => r.total != null);
+    // Total is the overall percentage across every subject sat — marks
+    // achieved over marks possible, bounded 0-100 (not a raw mark sum).
+    const total = sumOutOf ? Math.round((sumScore / sumOutOf) * 10000) / 100 : null;
+    // Average is the mean of the individual subject percentages. This is
+    // what Performance Levels (as configured in Exam Settings) are banded
+    // from, since each level's range is itself a 0-100 percentage band.
+    const meanscore = percentageCount ? Math.round((sumPct / percentageCount) * 100) / 100 : null;
+    return { student: s, bySubject, total, meanscore, sumScore, sumOutOf, percentageCount };
+  }).filter((r) => r.percentageCount > 0);
 
-  // Rank by total percentage points.
+  // Rank by overall total percentage.
   perStudent.sort((a, b) => b.total - a.total);
   let pos = 0, lastTotal = null;
   perStudent.forEach((r, i) => {
@@ -5162,14 +5167,15 @@ function computeAnalysis(markRows, roster) {
     });
   });
 
-  // Class mean is the average of learners' meanscores (equivalent to the
-  // average of their total percentage sums divided by subject count).
+  // Class mean is the average of learners' overall total percentages.
   const classMean = perStudent.length ? Math.round((perStudent.reduce((sum, r) => sum + r.total, 0) / perStudent.length) * 100) / 100 : 0;
+  // Class average-of-averages — the footer figure for the new Average column.
+  const classMeanOfAverages = perStudent.length ? Math.round((perStudent.reduce((sum, r) => sum + r.meanscore, 0) / perStudent.length) * 100) / 100 : 0;
   const classMeanPercent = classMean;
   const top3 = perStudent.slice(0, 3);
   const top3Boys = perStudent.filter((r) => r.student.gender === "M").slice(0, 3);
   const top3Girls = perStudent.filter((r) => r.student.gender === "F").slice(0, 3);
-  return { perStudent, subjectMeans, classMean, classMeanPercent, top3, top3Boys, top3Girls };
+  return { perStudent, subjectMeans, classMean, classMeanOfAverages, classMeanPercent, top3, top3Boys, top3Girls };
 }
 
 function gradeForPercent(pct, system, gradingLevels) {
@@ -6024,23 +6030,25 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
   const [showList, setShowList] = useState(false);
   const classTeacher = staff.find((s) => s.classTeacherOf === cls);
   const subjects = Object.keys(analysis.subjectMeans);
+  const legend = buildSubjectLegend(subjects.map((s) => ({ subject: s })));
 
   const buildHtml = () => `
-    <div class="header">
+    <div class="header" style="justify-content:center;text-align:center;">
       ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
       <div><div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
     </div>
-    <div class="meta" style="text-align:center;font-weight:700;color:#222;">${examName} · ${cls} · ${term} · ${year}</div>
+    <div class="meta" style="text-align:center;font-weight:700;color:#222;">Mark List — ${examName} · ${cls} · ${term} · ${year}</div>
     <table>
-      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${s} %</th>`).join("")}<th>Total Marks (Sum)</th>${system ? "<th>Level</th>" : ""}</tr></thead>
+      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${subjectAbbr(s)}</th>`).join("")}<th>Total %</th><th>Average %</th>${system ? "<th>Level</th>" : ""}</tr></thead>
       <tbody>
         ${analysis.perStudent.map((r) => {
-          const level = gradeForPercent(r.total, system, gradingLevels);
-          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct + "%" : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
+          const level = gradeForPercent(r.meanscore, system, gradingLevels);
+          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td><td>${Number(r.meanscore).toFixed(1)}</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
         }).join("")}
-        <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td>${system ? "<td></td>" : ""}</tr>
+        <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td><td><b>${Number(analysis.classMeanOfAverages).toFixed(1)}</b></td>${system ? "<td></td>" : ""}</tr>
       </tbody>
     </table>
+    <div style="font-size:11px;color:#666;margin-top:6px;">Key: ${legend.map((l) => `${l.abbr} = ${l.full}`).join(" · ")}. All marks and totals are percentages.</div>
     <div class="summary">
       <div>Class mean score: <b style="display:inline">${Number(analysis.classMean).toFixed(2)}</b></div>
       <b>Top 3 overall</b>
@@ -6056,15 +6064,13 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
 
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20 }}>
-      <div className="flex items-center justify-between mb-3">
-        <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 16, fontWeight: 600 }}>Mark List — {cls}, {examName}</h3>
-        <div className="flex gap-2">
-          <button onClick={() => setShowList((v) => !v)} className="focus-ring flex items-center gap-1.5" style={{ padding: "7px 12px", borderRadius: 8, border: `1px solid ${LINE}`, background: PANEL, fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Eye size={13} /> {showList ? "Hide" : "View"} Mark List</button>
-          <button onClick={() => printDocument(`${cls} Mark List`, buildHtml())} className="focus-ring flex items-center gap-1.5" style={{ padding: "7px 12px", borderRadius: 8, border: "none", background: RAIL, color: "#fff", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={13} /> Download PDF</button>
-        </div>
+      <div className="flex justify-end gap-2 mb-2">
+        <button onClick={() => setShowList((v) => !v)} className="focus-ring flex items-center gap-1.5" style={{ padding: "7px 12px", borderRadius: 8, border: `1px solid ${LINE}`, background: PANEL, fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Eye size={13} /> {showList ? "Hide" : "View"} Mark List</button>
+        <button onClick={() => printDocument(`${cls} Mark List`, buildHtml())} className="focus-ring flex items-center gap-1.5" style={{ padding: "7px 12px", borderRadius: 8, border: "none", background: RAIL, color: "#fff", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={13} /> Download PDF</button>
       </div>
+      <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 16, fontWeight: 600, textAlign: "center", marginBottom: 3 }}>Mark List — {cls}, {examName}</h3>
 
-      <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 10 }}>Class mean score: <b>{Number(analysis.classMean).toFixed(2)}</b> · {analysis.perStudent.length} students ranked</p>
+      <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 10, textAlign: "center" }}>Class mean score: <b>{Number(analysis.classMean).toFixed(2)}</b> · {analysis.perStudent.length} students ranked</p>
 
       {showList && (
         <div style={{ overflowX: "auto" }}>
@@ -6072,22 +6078,36 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
             <thead>
               <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
                 <th style={{ padding: "6px 8px" }}>Pos</th><th style={{ padding: "6px 8px" }}>Name</th>
-                {subjects.map((s) => <th key={s} style={{ padding: "6px 8px" }}>{s}</th>)}
-                <th style={{ padding: "6px 8px" }}>Total Marks (Sum)</th>
+                {subjects.map((s) => <th key={s} style={{ padding: "6px 8px" }} title={s}>{subjectAbbr(s)}</th>)}
+                <th style={{ padding: "6px 8px" }}>Total %</th>
+                <th style={{ padding: "6px 8px" }}>Average %</th>
+                {system && <th style={{ padding: "6px 8px" }}>Level</th>}
               </tr>
             </thead>
             <tbody>
-              {analysis.perStudent.map((r) => (
-                <tr key={r.student.id} style={{ borderBottom: `1px solid ${LINE}` }}>
-                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.position}</td>
-                  <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.student.name}</td>
-                  {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.bySubject[s] ? `${Math.round(Number(r.bySubject[s].pct))}%` : "—"}</td>)}
-                  <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}</td>
-                </tr>
-              ))}
-              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}><td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>{subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}<td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}</b></td></tr>
+              {analysis.perStudent.map((r) => {
+                const level = gradeForPercent(r.meanscore, system, gradingLevels);
+                return (
+                  <tr key={r.student.id} style={{ borderBottom: `1px solid ${LINE}` }}>
+                    <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.position}</td>
+                    <td style={{ padding: "6px 8px", fontWeight: 600 }}>{r.student.name}</td>
+                    {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.bySubject[s] ? Math.round(Number(r.bySubject[s].pct)) : "—"}</td>)}
+                    <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}</td>
+                    <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Number(r.meanscore).toFixed(1)}</td>
+                    {system && <td style={{ padding: "6px 8px" }}>{level ? <LevelBadge band={level.band}>{level.level}</LevelBadge> : "—"}</td>}
+                  </tr>
+                );
+              })}
+              <tr style={{ borderTop: `2px solid ${LINE}`, fontWeight: 700 }}>
+                <td></td><td style={{ padding: "6px 8px" }}><b>Meanscore</b></td>
+                {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}
+                <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}</b></td>
+                <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMeanOfAverages).toFixed(1)}</b></td>
+                {system && <td></td>}
+              </tr>
             </tbody>
           </table>
+          <p style={{ fontSize: 11, color: "#a39c86", marginTop: 6 }}>Key: {legend.map((l) => `${l.abbr} = ${l.full}`).join(" · ")}</p>
           <div className="grid grid-cols-3 gap-3 mt-4">
             <div>
               <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 4 }}>Top 3 overall</div>
@@ -6198,7 +6218,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
       record.bySubject[subj].level = level ? level.level : "—";
       sumPoints += level ? level.points : 0;
     });
-    const overallLevel = gradeForPercent(record.total, system, gradingLevels);
+    const overallLevel = gradeForPercent(record.meanscore, system, gradingLevels);
     return { subjects, sumScore, sumOutOf, sumPoints, maxPoints: maxPts * subjects.length, overallLevel };
   }, [record, system, gradingLevels]);
 
