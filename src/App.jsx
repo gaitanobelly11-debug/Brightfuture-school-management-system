@@ -16,7 +16,7 @@ import {
  *  fetchSchoolData below) instead of being seeded here, so nothing resets
  *  when you sign in, and classes/subjects can be added from the app.
  * ---------------------------------------------------------------------- */
-const CURRENT_TERM = "Term 2";
+const DEFAULT_TERM = "Term 1"; // fallback only — the real current term is set in School Settings
 const TERMS = ["Term 1", "Term 2", "Term 3"];
 const EXAM_YEARS = (() => {
   const y = new Date().getFullYear();
@@ -240,6 +240,7 @@ async function fetchSchoolSettings(token) {
     motto: r.motto || "", vision: r.vision || "", email: r.email || "", contact: r.contact || "", location: r.location || "",
     termClosingDate: r.term_closing_date || "", nextTermOpeningDate: r.next_term_opening_date || "",
     arrivalCutoff: (r.arrival_cutoff || "07:20:00").slice(0, 5), departureCutoff: (r.departure_cutoff || "17:00:00").slice(0, 5),
+    currentTerm: r.current_term || DEFAULT_TERM,
   };
 }
 
@@ -1356,6 +1357,7 @@ export default function App() {
         term_closing_date: patch.termClosingDate || null, next_term_opening_date: patch.nextTermOpeningDate || null,
         arrival_cutoff: patch.arrivalCutoff ? `${patch.arrivalCutoff}:00` : "07:20:00",
         departure_cutoff: patch.departureCutoff ? `${patch.departureCutoff}:00` : "17:00:00",
+        current_term: patch.currentTerm || DEFAULT_TERM,
       },
       prefer: "return=minimal",
     });
@@ -1385,14 +1387,14 @@ export default function App() {
     setGrades((prev) => {
       const exists = prev.find((g) => g.studentId === studentId && g.subject === subject);
       if (exists) return prev.map((g) => (g.studentId === studentId && g.subject === subject ? { ...g, score } : g));
-      return [...prev, { studentId, subject, term: CURRENT_TERM, score }];
+      return [...prev, { studentId, subject, term: schoolSettings?.currentTerm || DEFAULT_TERM, score }];
     });
   };
   const saveGrade = async (studentId, subject, score) => {
     try {
       await pgFetch("grades?on_conflict=student_id,subject,term", authedUser.accessToken, {
         method: "POST",
-        body: { student_id: studentId, subject, term: CURRENT_TERM, score },
+        body: { student_id: studentId, subject, term: schoolSettings?.currentTerm || DEFAULT_TERM, score },
         prefer: "resolution=merge-duplicates,return=minimal",
       });
     } catch (err) {
@@ -2056,7 +2058,7 @@ function TopBar({ authedUser, onLogout, schoolSettings, classCount, myAttendance
         )}
         <h1 style={{ fontFamily: DISPLAY_FONT, fontSize: 22, fontWeight: 600, letterSpacing: -0.2, margin: 0 }}>{schoolSettings?.name || "Brightfuture Primary School"}</h1>
         <p style={{ fontSize: 11.5, color: "#7A7568", margin: "2px 0 0" }}>{[schoolSettings?.address, schoolSettings?.email, schoolSettings?.contact].filter(Boolean).join(" · ")}</p>
-        <p style={{ fontSize: 10.5, color: "#9a9484", margin: "2px 0 0" }}>{CURRENT_TERM} · {classCount} classes · School Management System</p>
+        <p style={{ fontSize: 10.5, color: "#9a9484", margin: "2px 0 0" }}>{schoolSettings?.currentTerm || DEFAULT_TERM} · {classCount} classes · School Management System</p>
       </div>
       <div style={{ marginLeft: "auto" }} className="flex items-center gap-3">
         <div style={{ textAlign: "right" }}>
@@ -3195,7 +3197,7 @@ function AttendanceView({ students, attendance, markAttendance, showToast, schoo
 /* ---------------------------------------------------------------------- *
  *  GRADES
  * ---------------------------------------------------------------------- */
-function GradesView({ students, grades, setGrade, saveGrade, showToast, classes, subjects, authedUser, isAdmin }) {
+function GradesView({ students, grades, setGrade, saveGrade, showToast, classes, subjects, authedUser, isAdmin, schoolSettings }) {
   const lockedClass = !isAdmin ? authedUser.classTeacherOf : null;
   const [cls, setCls] = useState(lockedClass || classes[0]);
   const [subject, setSubject] = useState(subjects[0]);
@@ -3222,7 +3224,7 @@ function GradesView({ students, grades, setGrade, saveGrade, showToast, classes,
   return (
     <div className="px-7 py-6" style={{ maxWidth: 900 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Grades</h2>
-      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 10 }}>{CURRENT_TERM} scores{lockedClass ? ` for ${lockedClass}` : " by class"} and subject — CBC performance bands.</p>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 10 }}>{schoolSettings?.currentTerm || DEFAULT_TERM} scores{lockedClass ? ` for ${lockedClass}` : " by class"} and subject — CBC performance bands.</p>
       <div className="flex items-center gap-3 mb-4" style={{ fontSize: 11, color: "#8a8474" }}>
         {["EE", "ME", "AE", "BE"].map((code) => (
           <span key={code} className="flex items-center gap-1.5">
@@ -3287,7 +3289,7 @@ function FeesView(ctx) {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600 }}>Finance</h2>
-          <p style={{ fontSize: 12.5, color: "#7A7568" }}>{CURRENT_TERM} billing, payments, and expenditure.</p>
+          <p style={{ fontSize: 12.5, color: "#7A7568" }}>{ctx.schoolSettings?.currentTerm || DEFAULT_TERM} billing, payments, and expenditure.</p>
         </div>
         <div className="flex gap-1">
           {tabs.map((t) => (
@@ -3344,7 +3346,7 @@ function buildFeeStatusHtml({ rows, schoolSettings }) {
   return `
     <div class="header">
       ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
-      <div><div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div><div class="meta" style="margin:0;">School Fees Status — ${CURRENT_TERM}</div></div>
+      <div><div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div><div class="meta" style="margin:0;">School Fees Status — ${schoolSettings?.currentTerm || DEFAULT_TERM}</div></div>
     </div>
     ${classNames.map((cls, i) => classSection(cls, byClass[cls], i === 0)).join("")}
   `;
@@ -5037,6 +5039,7 @@ function GeneralSetupTab({ schoolSettings, updateSchoolSettings, uploadPhoto, sh
         </div>
         <Field label="Address"><input value={form.address || ""} onChange={set("address")} className="focus-ring" style={inputStyle} placeholder="P.O. Box …" /></Field>
         <Field label="Location"><input value={form.location || ""} onChange={set("location")} className="focus-ring" style={inputStyle} placeholder="e.g. Kiambu Road, Nairobi" /></Field>
+        <Field label="Current term"><select value={form.currentTerm || DEFAULT_TERM} onChange={set("currentTerm")} className="focus-ring" style={inputStyle}>{TERMS.map((t) => <option key={t} value={t}>{t}</option>)}</select></Field>
         <div className="flex gap-3">
           <Field label="Term closing date"><input type="date" value={form.termClosingDate || ""} onChange={set("termClosingDate")} className="focus-ring" style={inputStyle} /></Field>
           <Field label="Next term opening date"><input type="date" value={form.nextTermOpeningDate || ""} onChange={set("nextTermOpeningDate")} className="focus-ring" style={inputStyle} /></Field>
