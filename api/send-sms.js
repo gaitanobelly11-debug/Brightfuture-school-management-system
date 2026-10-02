@@ -88,7 +88,13 @@ export default async function handler(req, res) {
               headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", apiKey: AT_API_KEY },
               body: new URLSearchParams({ username: AT_USERNAME, to: item.to, message: item.message }),
             });
-            const data = await atRes.json();
+            const rawBody = await atRes.text();
+            let data;
+            try {
+              data = JSON.parse(rawBody);
+            } catch {
+              return { to: item.to, ok: false, error: `Africa's Talking: ${rawBody.slice(0, 150) || "empty response"}` };
+            }
             if (!atRes.ok) return { to: item.to, ok: false, error: data?.SMSMessageData?.Message || "Error" };
             const rec = data?.SMSMessageData?.Recipients?.[0];
             return { to: item.to, ok: true, cost: rec ? parseFloat(String(rec.cost || "0").replace(/[^\d.]/g, "")) || 0 : 0 };
@@ -132,7 +138,17 @@ export default async function handler(req, res) {
       },
       body: new URLSearchParams({ username: AT_USERNAME, to: uniqueNumbers.join(","), message }),
     });
-    const data = await atRes.json();
+    const rawBody = await atRes.text();
+    let data;
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      // Africa's Talking sometimes replies with plain text (usually an
+      // auth failure) instead of JSON — surface that text directly rather
+      // than a confusing "not valid JSON" error.
+      res.status(atRes.status || 500).json({ error: `Africa's Talking: ${rawBody.slice(0, 200) || "empty response"}. Check AFRICASTALKING_API_KEY / AFRICASTALKING_USERNAME in Vercel.` });
+      return;
+    }
     if (!atRes.ok) {
       res.status(atRes.status).json({ error: data?.SMSMessageData?.Message || "Africa's Talking returned an error." });
       return;
