@@ -5129,12 +5129,12 @@ function computeAnalysis(markRows, roster) {
       bySubjectAll[r.subject] = bySubjectAll[r.subject] || [];
       bySubjectAll[r.subject].push(pct);
     });
-    // Total is the overall percentage across every subject sat — marks
-    // achieved over marks possible, bounded 0-100 (not a raw mark sum).
-    const total = sumOutOf ? Math.round((sumScore / sumOutOf) * 10000) / 100 : null;
-    // Average is the mean of the individual subject percentages. This is
-    // what Performance Levels (as configured in Exam Settings) are banded
-    // from, since each level's range is itself a 0-100 percentage band.
+    // Total is the sum of the subject percentage marks shown in the table —
+    // it should literally add up the row's own % columns.
+    const total = percentageCount ? sumPct : null;
+    // Average is the mean of those same subject percentages. This is what
+    // Performance Levels (as configured in Exam Settings) are banded from,
+    // since each level's range is itself a 0-100 percentage band.
     const meanscore = percentageCount ? Math.round((sumPct / percentageCount) * 100) / 100 : null;
     return { student: s, bySubject, total, meanscore, sumScore, sumOutOf, percentageCount };
   }).filter((r) => r.percentageCount > 0);
