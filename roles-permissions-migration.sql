@@ -164,3 +164,7 @@ create policy "library_full_access_issues" on public.book_issues
   for all
   using (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Librarian'])))
   with check (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Librarian'])));
+
+-- Current term is now editable from School Settings instead of hardcoded.
+ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS current_term text DEFAULT 'Term 2';
+UPDATE school_settings SET current_term = 'Term 2' WHERE id = 1 AND current_term IS NULL;
