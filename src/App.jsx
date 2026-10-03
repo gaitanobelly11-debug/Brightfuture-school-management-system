@@ -2900,7 +2900,7 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
       showToast(`Recorded ${money(amt)} (${account}) for ${student.name}`);
       const acctDue = COMPULSORY_ACCOUNTS.includes(account) ? due : (otherFeeStructure[account]?.[student.class] || 0);
       const paidToDate = payments.filter((p) => p.account === account).reduce((s, p) => s + p.amount, 0) + amt;
-      printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: saved, due: acctDue, paidToDate }));
+      printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: saved, due: acctDue, paidToDate }), "A5");
       setAmount("");
     } catch (err) {
       showToast(err.message || "Couldn't record payment");
@@ -2954,7 +2954,7 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
               <span style={{ color: "#6b6656" }}>{p.date} · {p.account || "School Fees"} · {p.method}</span>
               <div className="flex items-center gap-2">
                 <span style={{ fontFamily: MONO_FONT, fontWeight: 600 }}>{money(p.amount)}</span>
-                <button onClick={() => printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: p, due: acctDue, paidToDate }))} className="focus-ring" title="Print receipt" style={{ background: "none", border: "none", color: "#5b5747", cursor: "pointer" }}><Download size={13} /></button>
+                <button onClick={() => printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: p, due: acctDue, paidToDate }), "A5")} className="focus-ring" title="Print receipt" style={{ background: "none", border: "none", color: "#5b5747", cursor: "pointer" }}><Download size={13} /></button>
                 <button onClick={() => deletePayment(p.id)} className="focus-ring" title="Delete payment" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={13} /></button>
               </div>
             </div>
@@ -3439,7 +3439,7 @@ function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showT
               showToast(`Recorded ${money(payment.amount)} for ${modalStudent.name}`);
               const due = feeStructure[modalStudent.class] || 0;
               const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === "School Fees").reduce((s, p) => s + p.amount, 0) + payment.amount;
-              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }));
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }), "A5");
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -3522,7 +3522,7 @@ function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, sh
               showToast(`Recorded ${money(payment.amount)} (${account}) for ${modalStudent.name}`);
               const due = dueFor(modalStudent);
               const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === account).reduce((s, p) => s + p.amount, 0) + payment.amount;
-              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }));
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }), "A5");
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -5217,12 +5217,13 @@ function gradeForPercent(pct, system, gradingLevels) {
   return levels.find((l) => pct >= l.from && pct <= l.to) || null;
 }
 
-function printDocument(title, bodyHtml) {
+function printDocument(title, bodyHtml, pageSize) {
   const w = window.open("", "_blank");
   if (!w) return;
   w.document.write(`
     <html><head><title>${title}</title>
     <style>
+      ${pageSize ? `@page { size: ${pageSize}; margin: 12mm; }` : ""}
       body { font-family: Georgia, serif; padding: 32px; color: #1E2333; }
       table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
       th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
@@ -5281,7 +5282,7 @@ function buildReceiptHtml({ schoolSettings, student, payment, due, paidToDate })
   const balance = due > 0 ? Math.max(0, due - paidToDate) : null;
   const receiptNo = `RCT-${String(payment.id).padStart(6, "0")}`;
   return `
-    ${schoolSettings?.logoUrl ? `<img class="watermark" src="${schoolSettings.logoUrl}" />` : ""}
+    ${schoolSettings?.logoUrl ? `<img class="watermark" src="${schoolSettings.logoUrl}" style="width:220px;height:220px;" />` : ""}
     <div class="header" style="justify-content:center;text-align:center;">
       ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
       <div>
@@ -5295,11 +5296,11 @@ function buildReceiptHtml({ schoolSettings, student, payment, due, paidToDate })
       <span>Receipt No: <b>${receiptNo}</b></span>
       <span>Date: <b>${payment.date}</b></span>
     </div>
-    <div style="border:1px solid #ddd;border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:13px;display:flex;gap:24px;">
-      <div><b>Received from:</b> ${student.name}</div>
-      <div><b>Class:</b> ${student.class}</div>
-      <div><b>Adm No:</b> ${student.admissionNo || "—"}</div>
-      <div><b>Method:</b> ${payment.method}</div>
+    <div style="border:1px solid #ddd;border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:6px 16px;">
+      <div style="flex:1 1 45%;"><b>Received from:</b> ${student.name}</div>
+      <div style="flex:1 1 20%;"><b>Class:</b> ${student.class}</div>
+      <div style="flex:1 1 25%;"><b>Adm No:</b> ${student.admissionNo || "—"}</div>
+      <div style="flex:1 1 20%;"><b>Method:</b> ${payment.method}</div>
     </div>
     <table>
       <thead><tr><th>Item</th><th style="text-align:right;">Amount (KSh)</th></tr></thead>
