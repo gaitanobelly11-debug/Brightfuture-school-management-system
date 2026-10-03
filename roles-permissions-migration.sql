@@ -168,3 +168,8 @@ create policy "library_full_access_issues" on public.book_issues
 -- Current term is now editable from School Settings instead of hardcoded.
 ALTER TABLE school_settings ADD COLUMN IF NOT EXISTS current_term text DEFAULT 'Term 2';
 UPDATE school_settings SET current_term = 'Term 2' WHERE id = 1 AND current_term IS NULL;
+
+-- Multi-item receipts: payments made together (e.g. transport + tuition in
+-- one receipt) share a batch_id so they can be reprinted as one receipt.
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS batch_id text;
+CREATE INDEX IF NOT EXISTS payments_batch_id_idx ON payments (batch_id);
