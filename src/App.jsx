@@ -195,7 +195,7 @@ async function fetchSchoolData(token) {
     })),
     grades: grades.map((g) => ({ studentId: g.student_id, subject: g.subject, term: g.term, score: g.score })),
     attendance: attendance.map((a) => ({ date: a.date, studentId: a.student_id, status: a.status })),
-    payments: payments.map((p) => ({ id: p.id, studentId: p.student_id, amount: Number(p.amount), date: p.date, method: p.method, account: p.account || "School Fees" })),
+    payments: payments.map((p) => ({ id: p.id, studentId: p.student_id, amount: Number(p.amount), date: p.date, method: p.method, account: p.account || "School Fees", batchId: p.batch_id || null })),
     // feeStructure stays flat ({ class: amount }) and School-Fees-only, so
     // every existing due/balance calculation elsewhere keeps working
     // unchanged. The optional accounts (Food/Exams/Transport) get their own
@@ -1420,10 +1420,21 @@ export default function App() {
   const recordPayment = async (payment) => {
     const [row] = await pgFetch("payments", authedUser.accessToken, {
       method: "POST",
-      body: { student_id: payment.studentId, amount: payment.amount, date: payment.date, method: payment.method, account: payment.account || "School Fees" },
+      body: { student_id: payment.studentId, amount: payment.amount, date: payment.date, method: payment.method, account: payment.account || "School Fees", batch_id: payment.batchId || null },
     });
-    const saved = { id: row.id, studentId: row.student_id, amount: Number(row.amount), date: row.date, method: row.method, account: row.account || "School Fees" };
+    const saved = { id: row.id, studentId: row.student_id, amount: Number(row.amount), date: row.date, method: row.method, account: row.account || "School Fees", batchId: row.batch_id || null };
     setPayments((prev) => [...prev, saved]);
+    return saved;
+  };
+  // Records several fee items as one transaction (e.g. tuition + transport +
+  // food paid together) and returns all the saved rows, sharing a batch_id
+  // so they print as a single combined receipt.
+  const recordPaymentBatch = async (studentId, { date, method, entries }) => {
+    const batchId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const saved = [];
+    for (const entry of entries) {
+      saved.push(await recordPayment({ studentId, amount: entry.amount, date, method, account: entry.account, batchId }));
+    }
     return saved;
   };
   const deletePayment = async (id) => {
@@ -1639,7 +1650,7 @@ export default function App() {
     generateLessonPlan,
     visitors, addVisitor,
     libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook,
-    addStudent, deleteStudent, updateStudent, promoteClassStudents, addStaff, markAttendance, setGrade, saveGrade, recordPayment, showToast,
+    addStudent, deleteStudent, updateStudent, promoteClassStudents, addStaff, markAttendance, setGrade, saveGrade, recordPayment, recordPaymentBatch, showToast,
     addClass, removeClass, addSubject, removeSubject, updateSchoolSettings, setClassFee,
     addExam, deleteExam, addEvent, deleteEvent, deletePayment, saveGradingLevel, setClassGrading, sendNotification, readNotification, deleteNotification,
     createTeacherLogin, updateTeacherLogin, deleteStaffMember, updateStaffDetails,
@@ -2712,7 +2723,7 @@ function PromoteClassModal({ students, classes, onClose, onPromote }) {
   );
 }
 
-function StudentProfile({ student, onClose, grades, attendance, payments, recordPayment, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings }) {
+function StudentProfile({ student, onClose, grades, attendance, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings }) {
   const [tab, setTab] = useState("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -2829,7 +2840,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
             </div>
           )}
           {tab === "payments" && (
-            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPayment={recordPayment} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} />
+            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPaymentBatch={recordPaymentBatch} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} />
           )}
         </div>
       </div>
@@ -2885,27 +2896,10 @@ function AttendanceBadge({ status }) {
   return <span className="flex items-center gap-1.5" style={{ color: m.color, fontSize: 12.5, fontWeight: 600 }}><Icon size={13} />{status}</span>;
 }
 
-function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPayment, deletePayment, showToast, schoolSettings }) {
-  const [amount, setAmount] = useState("");
-  const [method, setMethod] = useState("M-Pesa");
-  const [account, setAccount] = useState("School Fees");
-
-  const submit = async (e) => {
-    e.preventDefault();
-    const amt = Number(amount);
-    if (!amt || amt <= 0) return;
-    try {
-      const payment = { studentId: student.id, amount: amt, date: new Date().toISOString().slice(0, 10), method, account };
-      const saved = await recordPayment(payment);
-      showToast(`Recorded ${money(amt)} (${account}) for ${student.name}`);
-      const acctDue = COMPULSORY_ACCOUNTS.includes(account) ? due : (otherFeeStructure[account]?.[student.class] || 0);
-      const paidToDate = payments.filter((p) => p.account === account).reduce((s, p) => s + p.amount, 0) + amt;
-      printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: saved, due: acctDue, paidToDate }), "A5");
-      setAmount("");
-    } catch (err) {
-      showToast(err.message || "Couldn't record payment");
-    }
-  };
+function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPaymentBatch, deletePayment, showToast, schoolSettings }) {
+  const [payOpen, setPayOpen] = useState(false);
+  const dueForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? due : (otherFeeStructure[acct]?.[student.class] || 0));
+  const paidToDateForAccount = (acct) => payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
 
   return (
     <div>
@@ -2933,34 +2927,57 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
           );
         })}
       </div>
-      <div className="flex gap-2 mb-4">
-        <select value={account} onChange={(e) => setAccount(e.target.value)} className="focus-ring" style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${LINE}`, fontSize: 13 }}>
-          {PAYMENT_ACCOUNTS.map((a) => <option key={a}>{a}</option>)}
-        </select>
-        <input type="number" min={1} value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount (KSh)" className="focus-ring" style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1px solid ${LINE}`, fontSize: 13, fontFamily: MONO_FONT }} />
-        <select value={method} onChange={(e) => setMethod(e.target.value)} className="focus-ring" style={{ padding: "8px 10px", borderRadius: 8, border: `1px solid ${LINE}`, fontSize: 13 }}>
-          <option>M-Pesa</option><option>Cash</option><option>Bank</option>
-        </select>
-        <button type="button" onClick={submit} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Record</button>
-      </div>
+      <button type="button" onClick={() => setPayOpen(true)} className="focus-ring" style={{ marginBottom: 16, padding: "9px 16px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Record Payment</button>
+
       <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 6 }}>Payment history</div>
       <div className="flex flex-col gap-1.5">
         {payments.length === 0 && <p style={{ fontSize: 12.5, color: "#c4bda7" }}>No payments recorded yet.</p>}
         {payments.slice().reverse().map((p) => {
-          const acctDue = COMPULSORY_ACCOUNTS.includes(p.account) ? due : (otherFeeStructure[p.account]?.[student.class] || 0);
+          const acctDue = dueForAccount(p.account);
           const paidToDate = payments.filter((x) => x.account === p.account && x.date <= p.date).reduce((s, x) => s + x.amount, 0);
           return (
             <div key={p.id} className="flex items-center justify-between" style={{ fontSize: 12.5, padding: "5px 0", borderBottom: `1px solid ${LINE}` }}>
               <span style={{ color: "#6b6656" }}>{p.date} · {p.account || "School Fees"} · {p.method}</span>
               <div className="flex items-center gap-2">
                 <span style={{ fontFamily: MONO_FONT, fontWeight: 600 }}>{money(p.amount)}</span>
-                <button onClick={() => printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: p, due: acctDue, paidToDate }), "A5")} className="focus-ring" title="Print receipt" style={{ background: "none", border: "none", color: "#5b5747", cursor: "pointer" }}><Download size={13} /></button>
+                <button
+                  onClick={() => {
+                    const group = p.batchId ? payments.filter((x) => x.batchId === p.batchId) : [p];
+                    printDocument(`${student.name} Receipt`, buildReceiptHtml({
+                      schoolSettings, student, payments: group, date: p.date, method: p.method, receiptId: group[0].id,
+                      dueForAccount, paidToDateForAccount: (acct) => paidToDateForAccount(acct), // history reprint shows current totals
+                    }), "A5");
+                  }}
+                  className="focus-ring" title="Print receipt" style={{ background: "none", border: "none", color: "#5b5747", cursor: "pointer" }}
+                ><Download size={13} /></button>
                 <button onClick={() => deletePayment(p.id)} className="focus-ring" title="Delete payment" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={13} /></button>
               </div>
             </div>
           );
         })}
       </div>
+
+      {payOpen && (
+        <MultiPayModal
+          student={student}
+          dueForAccount={dueForAccount}
+          paidToDateForAccount={paidToDateForAccount}
+          onClose={() => setPayOpen(false)}
+          onSubmit={async ({ date, method, entries }) => {
+            try {
+              const saved = await recordPaymentBatch(student.id, { date, method, entries });
+              const total = entries.reduce((s, e) => s + e.amount, 0);
+              showToast(`Recorded ${money(total)} for ${student.name}`);
+              const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
+              const paidToDateAfter = (acct) => paidToDateForAccount(acct) + (entryAmount[acct] || 0);
+              printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payments: saved, date, method, receiptId: saved[0].id, dueForAccount, paidToDateForAccount: paidToDateAfter }), "A5");
+              setPayOpen(false);
+            } catch (err) {
+              showToast(err.message || "Couldn't record payment");
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -3369,7 +3386,7 @@ function buildFeeStatusHtml({ rows, schoolSettings }) {
   `;
 }
 
-function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showToast, feeStructure, classes, schoolSettings }) {
+function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, classes, schoolSettings }) {
   const [cls, setCls] = useState("All");
   const [modalStudent, setModalStudent] = useState(null);
   const roster = students.filter((s) => cls === "All" || s.class === cls);
@@ -3427,19 +3444,20 @@ function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showT
       </div>
 
       {modalStudent && (
-        <PayModal
+        <MultiPayModal
           student={modalStudent}
-          account="School Fees"
-          due={feeStructure[modalStudent.class] || 0}
-          paid={payments.filter((p) => p.studentId === modalStudent.id && p.account === "School Fees").reduce((s, p) => s + p.amount, 0)}
+          dueForAccount={(acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0))}
+          paidToDateForAccount={(acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0)}
           onClose={() => setModalStudent(null)}
-          onSubmit={async (payment) => {
+          onSubmit={async ({ date, method, entries }) => {
             try {
-              const saved = await recordPayment(payment);
-              showToast(`Recorded ${money(payment.amount)} for ${modalStudent.name}`);
-              const due = feeStructure[modalStudent.class] || 0;
-              const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === "School Fees").reduce((s, p) => s + p.amount, 0) + payment.amount;
-              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }), "A5");
+              const saved = await recordPaymentBatch(modalStudent.id, { date, method, entries });
+              const total = entries.reduce((s, e) => s + e.amount, 0);
+              showToast(`Recorded ${money(total)} for ${modalStudent.name}`);
+              const dueForAccount = (acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0));
+              const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
+              const paidToDateForAccount = (acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0) + (entryAmount[acct] || 0);
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payments: saved, date, method, receiptId: saved[0].id, dueForAccount, paidToDateForAccount }), "A5");
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -3454,7 +3472,7 @@ function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showT
 // The three optional accounts (Food, Exams, Transport) — same billing-table
 // shape as School Fees, but switchable between accounts, and a class
 // without a set amount just shows what's been paid with no due/balance nag.
-function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, showToast, otherFeeStructure, classes, schoolSettings }) {
+function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePayment, showToast, otherFeeStructure, feeStructure, classes, schoolSettings }) {
   const OPTIONAL_ACCOUNTS = PAYMENT_ACCOUNTS.filter((a) => !COMPULSORY_ACCOUNTS.includes(a));
   const [account, setAccount] = useState(OPTIONAL_ACCOUNTS[0]);
   const [cls, setCls] = useState("All");
@@ -3510,19 +3528,20 @@ function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, sh
       </div>
 
       {modalStudent && (
-        <PayModal
+        <MultiPayModal
           student={modalStudent}
-          account={account}
-          due={dueFor(modalStudent)}
-          paid={payments.filter((p) => p.studentId === modalStudent.id && p.account === account).reduce((s, p) => s + p.amount, 0)}
+          dueForAccount={(acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0))}
+          paidToDateForAccount={(acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0)}
           onClose={() => setModalStudent(null)}
-          onSubmit={async (payment) => {
+          onSubmit={async ({ date, method, entries }) => {
             try {
-              const saved = await recordPayment(payment);
-              showToast(`Recorded ${money(payment.amount)} (${account}) for ${modalStudent.name}`);
-              const due = dueFor(modalStudent);
-              const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === account).reduce((s, p) => s + p.amount, 0) + payment.amount;
-              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }), "A5");
+              const saved = await recordPaymentBatch(modalStudent.id, { date, method, entries });
+              const total = entries.reduce((s, e) => s + e.amount, 0);
+              showToast(`Recorded ${money(total)} for ${modalStudent.name}`);
+              const dueForAccount = (acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0));
+              const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
+              const paidToDateForAccount = (acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0) + (entryAmount[acct] || 0);
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payments: saved, date, method, receiptId: saved[0].id, dueForAccount, paidToDateForAccount }), "A5");
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -3654,6 +3673,84 @@ function PayModal({ student, account = "School Fees", due, paid, onClose, onSubm
         </div>
         <button type="button" onClick={submit} className="focus-ring" style={{ width: "100%", marginTop: 18, padding: "10px 0", borderRadius: 9, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Record Payment</button>
       </div>
+    </div>
+  );
+}
+
+// Record a payment against several fee items at once (e.g. tuition,
+// transport, and food in one transaction) — all items paid in this modal
+// land on the same combined receipt.
+function MultiPayModal({ student, dueForAccount, paidToDateForAccount, onClose, onSubmit }) {
+  const [amounts, setAmounts] = useState({});
+  const [method, setMethod] = useState("M-Pesa");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [busy, setBusy] = useState(false);
+
+  const entries = RECEIPT_ITEMS
+    .map((it) => ({ account: it.account, amount: Number(amounts[it.account]) || 0 }))
+    .filter((e) => e.amount > 0);
+  const total = entries.reduce((s, e) => s + e.amount, 0);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!entries.length) return;
+    setBusy(true);
+    try {
+      await onSubmit({ date, method, entries });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,24,20,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40 }} onClick={onClose}>
+      <form onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ background: PANEL, borderRadius: 16, width: 420, maxHeight: "86vh", overflowY: "auto", padding: 24 }}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 17, fontWeight: 600 }}>Record Payment</h3>
+          <button type="button" onClick={onClose} className="focus-ring" style={{ background: "none", border: "none", cursor: "pointer", color: "#9a9484" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 12.5, color: "#9a9484", marginBottom: 14 }}>{student.name} · {student.class} — fill in as many items as are being paid today</p>
+
+        <div className="flex gap-3 mb-3">
+          <Field label="Date"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="focus-ring" style={inputStyle} /></Field>
+          <Field label="Method">
+            <select value={method} onChange={(e) => setMethod(e.target.value)} className="focus-ring" style={inputStyle}>
+              <option>M-Pesa</option><option>Cash</option><option>Bank</option>
+            </select>
+          </Field>
+        </div>
+
+        <div style={{ border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden", marginBottom: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr", padding: "7px 12px", fontSize: 10.5, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", borderBottom: `1px solid ${LINE}` }}>
+            <span>Item</span><span>Balance</span><span>Amount</span>
+          </div>
+          {RECEIPT_ITEMS.map((it) => {
+            const due = dueForAccount(it.account);
+            const balance = due > 0 ? Math.max(0, due - paidToDateForAccount(it.account)) : null;
+            return (
+              <div key={it.account} style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1fr", padding: "6px 12px", alignItems: "center", borderBottom: `1px solid ${LINE}` }}>
+                <span style={{ fontSize: 12.5 }}>{it.label}</span>
+                <span style={{ fontSize: 11, fontFamily: MONO_FONT, color: "#6b6656" }}>{balance != null ? money(balance) : "—"}</span>
+                <input
+                  type="number" min={0} placeholder="0"
+                  value={amounts[it.account] || ""}
+                  onChange={(e) => setAmounts((prev) => ({ ...prev, [it.account]: e.target.value }))}
+                  className="focus-ring"
+                  style={{ width: "100%", padding: "5px 7px", borderRadius: 6, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12.5 }}
+                />
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center justify-between mb-4" style={{ fontSize: 13.5, fontWeight: 700 }}>
+          <span>Total</span><span style={{ fontFamily: MONO_FONT }}>{money(total)}</span>
+        </div>
+
+        <button type="submit" disabled={busy || total <= 0} className="focus-ring" style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: busy || total <= 0 ? 0.6 : 1 }}>
+          {busy ? "Saving…" : "Record & Print Receipt"}
+        </button>
+      </form>
     </div>
   );
 }
@@ -5223,10 +5320,10 @@ function printDocument(title, bodyHtml, pageSize) {
   w.document.write(`
     <html><head><title>${title}</title>
     <style>
-      ${pageSize ? `@page { size: ${pageSize}; margin: 12mm; }` : ""}
-      body { font-family: Georgia, serif; padding: 32px; color: #1E2333; }
+      ${pageSize ? `@page { size: ${pageSize}; margin: 10mm; }` : ""}
+      body { font-family: Georgia, serif; padding: ${pageSize ? "14px" : "32px"}; color: #1E2333; }
       table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
-      th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+      th, td { border: 1px solid #ccc; padding: ${pageSize ? "4px 8px" : "6px 10px"}; text-align: left; }
       th { background: #f2efe6; }
       .header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
       .header img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; }
@@ -5278,47 +5375,53 @@ function amountInWords(amount) {
 // Printable payment receipt — itemises every standard fee category (only the
 // one actually paid is filled in), shows the balance remaining on that
 // account, the amount in words, a signature line, and a faint logo watermark.
-function buildReceiptHtml({ schoolSettings, student, payment, due, paidToDate }) {
-  const balance = due > 0 ? Math.max(0, due - paidToDate) : null;
-  const receiptNo = `RCT-${String(payment.id).padStart(6, "0")}`;
+// `payments` is one or more {account, amount} items paid together in the
+// same transaction (e.g. tuition + transport + food in one go) — each gets
+// its own row with how much was paid against it and what's left owing.
+function buildReceiptHtml({ schoolSettings, student, payments, date, method, receiptId, dueForAccount, paidToDateForAccount }) {
+  const totalPaid = payments.reduce((sum, p) => sum + p.amount, 0);
+  const receiptNo = `RCT-${String(receiptId).padStart(6, "0")}`;
+  const paidByAccount = Object.fromEntries(payments.map((p) => [p.account, p.amount]));
   return `
-    ${schoolSettings?.logoUrl ? `<img class="watermark" src="${schoolSettings.logoUrl}" style="width:220px;height:220px;" />` : ""}
-    <div class="header" style="justify-content:center;text-align:center;">
-      ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
+    ${schoolSettings?.logoUrl ? `<img class="watermark" src="${schoolSettings.logoUrl}" style="width:200px;height:200px;" />` : ""}
+    <div class="header" style="justify-content:center;text-align:center;margin-bottom:2px;">
+      ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" style="width:40px;height:40px;" />` : ""}
       <div>
-        <div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div>
-        ${schoolSettings?.address ? `<div style="font-size:11.5px;color:#555;">${schoolSettings.address}</div>` : ""}
-        <div style="font-size:11.5px;color:#555;">${[schoolSettings?.contact, schoolSettings?.location].filter(Boolean).join(" · ")}</div>
+        <div class="school-name" style="font-size:17px;">${schoolSettings?.name || "Brightfuture Primary School"}</div>
+        ${schoolSettings?.address ? `<div style="font-size:10.5px;color:#555;">${schoolSettings.address}</div>` : ""}
+        <div style="font-size:10.5px;color:#555;">${[schoolSettings?.contact, schoolSettings?.location].filter(Boolean).join(" · ")}</div>
       </div>
     </div>
-    <h2 style="text-align:center;letter-spacing:2px;margin:18px 0 4px;font-size:18px;">PAYMENT RECEIPT</h2>
-    <div style="display:flex;justify-content:space-between;font-size:12.5px;color:#555;margin-bottom:14px;">
+    <h2 style="text-align:center;letter-spacing:2px;margin:10px 0 4px;font-size:16px;">PAYMENT RECEIPT</h2>
+    <div style="display:flex;justify-content:space-between;font-size:11.5px;color:#555;margin-bottom:8px;">
       <span>Receipt No: <b>${receiptNo}</b></span>
-      <span>Date: <b>${payment.date}</b></span>
+      <span>Date: <b>${date}</b></span>
     </div>
-    <div style="border:1px solid #ddd;border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:12.5px;display:flex;flex-wrap:wrap;gap:6px 16px;">
+    <div style="border:1px solid #ddd;border-radius:8px;padding:7px 12px;margin-bottom:10px;font-size:11.5px;display:flex;flex-wrap:wrap;gap:4px 14px;">
       <div style="flex:1 1 45%;"><b>Received from:</b> ${student.name}</div>
       <div style="flex:1 1 20%;"><b>Class:</b> ${student.class}</div>
       <div style="flex:1 1 25%;"><b>Adm No:</b> ${student.admissionNo || "—"}</div>
-      <div style="flex:1 1 20%;"><b>Method:</b> ${payment.method}</div>
+      <div style="flex:1 1 20%;"><b>Method:</b> ${method}</div>
     </div>
-    <table>
-      <thead><tr><th>Item</th><th style="text-align:right;">Amount (KSh)</th></tr></thead>
+    <table style="font-size:12px;">
+      <thead><tr><th>Item</th><th style="text-align:right;">Amount Paid</th><th style="text-align:right;">Balance</th></tr></thead>
       <tbody>
-        ${RECEIPT_ITEMS.map((it) => `<tr><td>${it.label}</td><td style="text-align:right;">${it.account === payment.account ? Number(payment.amount).toLocaleString() : "—"}</td></tr>`).join("")}
+        ${RECEIPT_ITEMS.map((it) => {
+          const paidNow = paidByAccount[it.account];
+          if (paidNow == null) return `<tr><td>${it.label}</td><td style="text-align:right;">—</td><td style="text-align:right;">—</td></tr>`;
+          const due = dueForAccount(it.account);
+          const balance = due > 0 ? Math.max(0, due - paidToDateForAccount(it.account)) : null;
+          return `<tr><td>${it.label}</td><td style="text-align:right;">${Number(paidNow).toLocaleString()}</td><td style="text-align:right;">${balance != null ? Number(balance).toLocaleString() : "—"}</td></tr>`;
+        }).join("")}
       </tbody>
       <tfoot>
-        <tr><td style="text-align:right;"><b>Amount Paid</b></td><td style="text-align:right;"><b>${money(payment.amount)}</b></td></tr>
-        ${due > 0 ? `
-          <tr><td style="text-align:right;">Total Paid to Date</td><td style="text-align:right;">${money(paidToDate)}</td></tr>
-          <tr><td style="text-align:right;"><b>Balance</b></td><td style="text-align:right;"><b>${money(balance)}</b></td></tr>
-        ` : ""}
+        <tr><td style="text-align:right;"><b>Total Paid</b></td><td style="text-align:right;"><b>${Number(totalPaid).toLocaleString()}</b></td><td></td></tr>
       </tfoot>
     </table>
-    <div style="margin:14px 0;font-size:13px;"><b>Amount in words:</b> ${amountInWords(payment.amount)}</div>
-    <div style="display:flex;justify-content:space-between;margin-top:48px;font-size:13px;">
-      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:4px;">Received By</div></div>
-      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:4px;">Signature</div></div>
+    <div style="margin:10px 0;font-size:12px;"><b>Amount in words:</b> ${amountInWords(totalPaid)}</div>
+    <div style="display:flex;justify-content:space-between;margin-top:26px;font-size:12px;">
+      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:3px;">Received By</div></div>
+      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:3px;">Signature</div></div>
     </div>
   `;
 }
