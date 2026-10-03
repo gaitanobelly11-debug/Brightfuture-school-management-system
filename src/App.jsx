@@ -325,8 +325,22 @@ async function fetchPayslips(token) {
  *  actually spent from, so each account's running balance (collected minus
  *  spent) can be shown.
  * ---------------------------------------------------------------------- */
-const PAYMENT_ACCOUNTS = ["School Fees", "Food", "Exams", "Transport"];
+const PAYMENT_ACCOUNTS = ["School Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
 const COMPULSORY_ACCOUNTS = ["School Fees"];
+// Receipt line items, in print order — "School Fees" reads as "Tuition Fees"
+// on the printed receipt, matching how parents expect to see it listed.
+const RECEIPT_ITEMS = [
+  { account: "Admission Fees", label: "Admission Fees" },
+  { account: "School Fees", label: "Tuition Fees" },
+  { account: "Exams", label: "Exams" },
+  { account: "Computer", label: "Computer" },
+  { account: "Library", label: "Library" },
+  { account: "Food", label: "Food" },
+  { account: "Transport", label: "Transport" },
+  { account: "Sports", label: "Sports" },
+  { account: "Equipment", label: "Equipment" },
+  { account: "Others", label: "Others" },
+];
 
 async function fetchExpenditures(token) {
   const rows = await pgFetch("expenditures?select=*&order=date.desc", token);
@@ -1408,7 +1422,9 @@ export default function App() {
       method: "POST",
       body: { student_id: payment.studentId, amount: payment.amount, date: payment.date, method: payment.method, account: payment.account || "School Fees" },
     });
-    setPayments((prev) => [...prev, { id: row.id, studentId: row.student_id, amount: Number(row.amount), date: row.date, method: row.method, account: row.account || "School Fees" }]);
+    const saved = { id: row.id, studentId: row.student_id, amount: Number(row.amount), date: row.date, method: row.method, account: row.account || "School Fees" };
+    setPayments((prev) => [...prev, saved]);
+    return saved;
   };
   const deletePayment = async (id) => {
     await pgFetch(`payments?id=eq.${id}`, authedUser.accessToken, { method: "DELETE", prefer: "return=minimal" });
@@ -2696,7 +2712,7 @@ function PromoteClassModal({ students, classes, onClose, onPromote }) {
   );
 }
 
-function StudentProfile({ student, onClose, grades, attendance, payments, recordPayment, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto }) {
+function StudentProfile({ student, onClose, grades, attendance, payments, recordPayment, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings }) {
   const [tab, setTab] = useState("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -2813,7 +2829,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
             </div>
           )}
           {tab === "payments" && (
-            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPayment={recordPayment} deletePayment={deletePayment} showToast={showToast} />
+            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPayment={recordPayment} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} />
           )}
         </div>
       </div>
@@ -2869,7 +2885,7 @@ function AttendanceBadge({ status }) {
   return <span className="flex items-center gap-1.5" style={{ color: m.color, fontSize: 12.5, fontWeight: 600 }}><Icon size={13} />{status}</span>;
 }
 
-function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPayment, deletePayment, showToast }) {
+function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPayment, deletePayment, showToast, schoolSettings }) {
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("M-Pesa");
   const [account, setAccount] = useState("School Fees");
@@ -2879,8 +2895,12 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
     const amt = Number(amount);
     if (!amt || amt <= 0) return;
     try {
-      await recordPayment({ studentId: student.id, amount: amt, date: new Date().toISOString().slice(0, 10), method, account });
+      const payment = { studentId: student.id, amount: amt, date: new Date().toISOString().slice(0, 10), method, account };
+      const saved = await recordPayment(payment);
       showToast(`Recorded ${money(amt)} (${account}) for ${student.name}`);
+      const acctDue = COMPULSORY_ACCOUNTS.includes(account) ? due : (otherFeeStructure[account]?.[student.class] || 0);
+      const paidToDate = payments.filter((p) => p.account === account).reduce((s, p) => s + p.amount, 0) + amt;
+      printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: saved, due: acctDue, paidToDate }));
       setAmount("");
     } catch (err) {
       showToast(err.message || "Couldn't record payment");
@@ -2926,12 +2946,20 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
       <div style={{ fontSize: 10.5, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 6 }}>Payment history</div>
       <div className="flex flex-col gap-1.5">
         {payments.length === 0 && <p style={{ fontSize: 12.5, color: "#c4bda7" }}>No payments recorded yet.</p>}
-        {payments.slice().reverse().map((p) => (
-          <div key={p.id} className="flex items-center justify-between" style={{ fontSize: 12.5, padding: "5px 0", borderBottom: `1px solid ${LINE}` }}>
-            <span style={{ color: "#6b6656" }}>{p.date} · {p.account || "School Fees"} · {p.method}</span>
-            <div className="flex items-center gap-2"><span style={{ fontFamily: MONO_FONT, fontWeight: 600 }}>{money(p.amount)}</span><button onClick={() => deletePayment(p.id)} className="focus-ring" title="Delete payment" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={13} /></button></div>
-          </div>
-        ))}
+        {payments.slice().reverse().map((p) => {
+          const acctDue = COMPULSORY_ACCOUNTS.includes(p.account) ? due : (otherFeeStructure[p.account]?.[student.class] || 0);
+          const paidToDate = payments.filter((x) => x.account === p.account && x.date <= p.date).reduce((s, x) => s + x.amount, 0);
+          return (
+            <div key={p.id} className="flex items-center justify-between" style={{ fontSize: 12.5, padding: "5px 0", borderBottom: `1px solid ${LINE}` }}>
+              <span style={{ color: "#6b6656" }}>{p.date} · {p.account || "School Fees"} · {p.method}</span>
+              <div className="flex items-center gap-2">
+                <span style={{ fontFamily: MONO_FONT, fontWeight: 600 }}>{money(p.amount)}</span>
+                <button onClick={() => printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payment: p, due: acctDue, paidToDate }))} className="focus-ring" title="Print receipt" style={{ background: "none", border: "none", color: "#5b5747", cursor: "pointer" }}><Download size={13} /></button>
+                <button onClick={() => deletePayment(p.id)} className="focus-ring" title="Delete payment" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -3407,8 +3435,11 @@ function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showT
           onClose={() => setModalStudent(null)}
           onSubmit={async (payment) => {
             try {
-              await recordPayment(payment);
+              const saved = await recordPayment(payment);
               showToast(`Recorded ${money(payment.amount)} for ${modalStudent.name}`);
+              const due = feeStructure[modalStudent.class] || 0;
+              const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === "School Fees").reduce((s, p) => s + p.amount, 0) + payment.amount;
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }));
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -3423,7 +3454,7 @@ function SchoolFeesTab({ students, payments, recordPayment, deletePayment, showT
 // The three optional accounts (Food, Exams, Transport) — same billing-table
 // shape as School Fees, but switchable between accounts, and a class
 // without a set amount just shows what's been paid with no due/balance nag.
-function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, showToast, otherFeeStructure, classes }) {
+function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, showToast, otherFeeStructure, classes, schoolSettings }) {
   const OPTIONAL_ACCOUNTS = PAYMENT_ACCOUNTS.filter((a) => !COMPULSORY_ACCOUNTS.includes(a));
   const [account, setAccount] = useState(OPTIONAL_ACCOUNTS[0]);
   const [cls, setCls] = useState("All");
@@ -3487,8 +3518,11 @@ function OtherPaymentsTab({ students, payments, recordPayment, deletePayment, sh
           onClose={() => setModalStudent(null)}
           onSubmit={async (payment) => {
             try {
-              await recordPayment(payment);
+              const saved = await recordPayment(payment);
               showToast(`Recorded ${money(payment.amount)} (${account}) for ${modalStudent.name}`);
+              const due = dueFor(modalStudent);
+              const paidToDate = payments.filter((p) => p.studentId === modalStudent.id && p.account === account).reduce((s, p) => s + p.amount, 0) + payment.amount;
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payment: saved, due, paidToDate }));
               setModalStudent(null);
             } catch (err) {
               showToast(err.message || "Couldn't record payment");
@@ -5199,12 +5233,93 @@ function printDocument(title, bodyHtml) {
       .meta { font-size: 13px; color: #555; margin-bottom: 16px; }
       .summary { margin-top: 18px; font-size: 13px; }
       .summary b { display: block; margin-top: 8px; }
+      .watermark { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 340px; height: 340px; object-fit: contain; opacity: 0.07; z-index: -1; pointer-events: none; }
     </style></head>
     <body>${bodyHtml}</body></html>
   `);
   w.document.close();
   w.focus();
   setTimeout(() => w.print(), 300);
+}
+
+// Spells out a whole number — used to put a payment amount into words on
+// the printed receipt (e.g. 12500 -> "Twelve Thousand Five Hundred").
+const WORDS_ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+const WORDS_TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+function threeDigitsToWords(n) {
+  let str = "";
+  if (n >= 100) { str += `${WORDS_ONES[Math.floor(n / 100)]} Hundred `; n %= 100; }
+  if (n >= 20) { str += `${WORDS_TENS[Math.floor(n / 10)]} `; n %= 10; }
+  if (n > 0) str += `${WORDS_ONES[n]} `;
+  return str.trim();
+}
+function numberToWords(num) {
+  num = Math.round(Math.abs(num));
+  if (num === 0) return "Zero";
+  const scales = ["", "Thousand", "Million", "Billion"];
+  const groups = [];
+  while (num > 0) { groups.push(num % 1000); num = Math.floor(num / 1000); }
+  let words = "";
+  for (let i = groups.length - 1; i >= 0; i--) {
+    if (groups[i] > 0) words += `${threeDigitsToWords(groups[i])}${scales[i] ? ` ${scales[i]}` : ""} `;
+  }
+  return words.trim();
+}
+// "Twelve Thousand Five Hundred Shillings Only" — the words line on a receipt.
+function amountInWords(amount) {
+  const whole = Math.floor(amount);
+  const cents = Math.round((amount - whole) * 100);
+  let str = `${numberToWords(whole)} Shilling${whole === 1 ? "" : "s"}`;
+  if (cents > 0) str += ` and ${numberToWords(cents)} Cent${cents === 1 ? "" : "s"}`;
+  return `${str} Only`;
+}
+
+// Printable payment receipt — itemises every standard fee category (only the
+// one actually paid is filled in), shows the balance remaining on that
+// account, the amount in words, a signature line, and a faint logo watermark.
+function buildReceiptHtml({ schoolSettings, student, payment, due, paidToDate }) {
+  const balance = due > 0 ? Math.max(0, due - paidToDate) : null;
+  const receiptNo = `RCT-${String(payment.id).padStart(6, "0")}`;
+  return `
+    ${schoolSettings?.logoUrl ? `<img class="watermark" src="${schoolSettings.logoUrl}" />` : ""}
+    <div class="header" style="justify-content:center;text-align:center;">
+      ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
+      <div>
+        <div class="school-name">${schoolSettings?.name || "Brightfuture Primary School"}</div>
+        ${schoolSettings?.address ? `<div style="font-size:11.5px;color:#555;">${schoolSettings.address}</div>` : ""}
+        <div style="font-size:11.5px;color:#555;">${[schoolSettings?.contact, schoolSettings?.location].filter(Boolean).join(" · ")}</div>
+      </div>
+    </div>
+    <h2 style="text-align:center;letter-spacing:2px;margin:18px 0 4px;font-size:18px;">PAYMENT RECEIPT</h2>
+    <div style="display:flex;justify-content:space-between;font-size:12.5px;color:#555;margin-bottom:14px;">
+      <span>Receipt No: <b>${receiptNo}</b></span>
+      <span>Date: <b>${payment.date}</b></span>
+    </div>
+    <div style="border:1px solid #ddd;border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:13px;display:flex;gap:24px;">
+      <div><b>Received from:</b> ${student.name}</div>
+      <div><b>Class:</b> ${student.class}</div>
+      <div><b>Adm No:</b> ${student.admissionNo || "—"}</div>
+      <div><b>Method:</b> ${payment.method}</div>
+    </div>
+    <table>
+      <thead><tr><th>Item</th><th style="text-align:right;">Amount (KSh)</th></tr></thead>
+      <tbody>
+        ${RECEIPT_ITEMS.map((it) => `<tr><td>${it.label}</td><td style="text-align:right;">${it.account === payment.account ? Number(payment.amount).toLocaleString() : "—"}</td></tr>`).join("")}
+      </tbody>
+      <tfoot>
+        <tr><td style="text-align:right;"><b>Amount Paid</b></td><td style="text-align:right;"><b>${money(payment.amount)}</b></td></tr>
+        ${due > 0 ? `
+          <tr><td style="text-align:right;">Total Paid to Date</td><td style="text-align:right;">${money(paidToDate)}</td></tr>
+          <tr><td style="text-align:right;"><b>Balance</b></td><td style="text-align:right;"><b>${money(balance)}</b></td></tr>
+        ` : ""}
+      </tfoot>
+    </table>
+    <div style="margin:14px 0;font-size:13px;"><b>Amount in words:</b> ${amountInWords(payment.amount)}</div>
+    <div style="display:flex;justify-content:space-between;margin-top:48px;font-size:13px;">
+      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:4px;">Received By</div></div>
+      <div style="text-align:center;width:45%;"><div style="border-top:1px solid #333;padding-top:4px;">Signature</div></div>
+    </div>
+  `;
 }
 
 function NotificationsView({ notifications, staff, isAdmin, authedUser, sendNotification, readNotification, deleteNotification, showToast }) {
