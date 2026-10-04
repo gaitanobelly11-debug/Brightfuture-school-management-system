@@ -3780,18 +3780,26 @@ function ExpenditureTab({ payments, expenditures, accountLoans, recordExpenditur
               <span style={{ color: "#6b6656" }}>{l.description}</span>
               <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: "#a1702c" }}>{money(owing)} left</span>
               {repayFor === l.id ? (
-                <div className="flex items-center gap-1.5">
-                  <input type="number" min={1} max={owing} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} placeholder="Amount" className="focus-ring" style={{ width: 80, padding: "4px 6px", borderRadius: 6, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12 }} />
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-1.5">
+                    <input type="number" min={1} max={owing} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} placeholder="Amount" className="focus-ring" style={{ width: 80, padding: "4px 6px", borderRadius: 6, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12 }} />
                   <button
                     onClick={async () => {
                       const amt = Math.min(owing, Number(repayAmount) || 0);
                       if (amt <= 0) return;
+                      const available = accountBalance(l.toAccount, payments, expenditures, accountLoans);
+                      if (amt > available) {
+                        showToast(`Please collect enough money in ${l.toAccount} to repay this amount — only ${money(available)} available.`);
+                        return;
+                      }
                       await repayLoan(l.id, amt);
                       showToast(`${l.toAccount} repaid ${money(amt)} to ${l.fromAccount}`);
                       setRepayFor(null); setRepayAmount("");
                     }}
                     className="focus-ring" style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: ACCENT, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                   >Pay</button>
+                  </div>
+                  <span style={{ fontSize: 10.5, color: "#a39c86" }}>{l.toAccount} has {money(accountBalance(l.toAccount, payments, expenditures, accountLoans))} available</span>
                 </div>
               ) : (
                 <button onClick={() => { setRepayFor(l.id); setRepayAmount(String(owing)); }} className="focus-ring" style={{ justifySelf: "start", padding: "5px 12px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Repay</button>
