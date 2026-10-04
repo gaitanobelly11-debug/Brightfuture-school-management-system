@@ -173,3 +173,26 @@ UPDATE school_settings SET current_term = 'Term 2' WHERE id = 1 AND current_term
 -- one receipt) share a batch_id so they can be reprinted as one receipt.
 ALTER TABLE payments ADD COLUMN IF NOT EXISTS batch_id text;
 CREATE INDEX IF NOT EXISTS payments_batch_id_idx ON payments (batch_id);
+
+-- Inter-account borrowing: when an expenditure would overdraw an account,
+-- Admin/Clerk can borrow the shortfall from another account with funds and
+-- repay it later. account_loans tracks each loan and how much of it is
+-- still outstanding (amount - repaid_amount).
+CREATE TABLE IF NOT EXISTS account_loans (
+  id bigint generated always as identity primary key,
+  from_account text not null,
+  to_account text not null,
+  amount numeric not null,
+  date date not null default current_date,
+  description text,
+  repaid_amount numeric not null default 0,
+  recorded_by text,
+  created_at timestamptz not null default now()
+);
+
+ALTER TABLE account_loans ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "account_loans_admin_only" ON account_loans
+  FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
