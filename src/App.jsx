@@ -327,6 +327,18 @@ async function fetchPayslips(token) {
  * ---------------------------------------------------------------------- */
 const PAYMENT_ACCOUNTS = ["School Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
 const COMPULSORY_ACCOUNTS = ["School Fees"];
+// What's actually available to spend from an account: money collected,
+// minus what's been spent, plus/minus any inter-account borrowing (money
+// borrowed in counts for it, money borrowed out or repaid back doesn't).
+function accountBalance(account, payments, expenditures, accountLoans) {
+  const collected = payments.filter((p) => p.account === account).reduce((s, p) => s + p.amount, 0);
+  const spent = expenditures.filter((e) => e.account === account).reduce((s, e) => s + e.amount, 0);
+  const borrowedIn = accountLoans.filter((l) => l.toAccount === account).reduce((s, l) => s + l.amount, 0);
+  const borrowedOut = accountLoans.filter((l) => l.fromAccount === account).reduce((s, l) => s + l.amount, 0);
+  const repaidOut = accountLoans.filter((l) => l.toAccount === account).reduce((s, l) => s + l.repaidAmount, 0);
+  const repaidIn = accountLoans.filter((l) => l.fromAccount === account).reduce((s, l) => s + l.repaidAmount, 0);
+  return collected - spent + borrowedIn - borrowedOut - repaidOut + repaidIn;
+}
 // Receipt line items, in print order — "School Fees" reads as "Tuition Fees"
 // on the printed receipt, matching how parents expect to see it listed.
 const RECEIPT_ITEMS = [
@@ -345,6 +357,16 @@ const RECEIPT_ITEMS = [
 async function fetchExpenditures(token) {
   const rows = await pgFetch("expenditures?select=*&order=date.desc", token);
   return rows.map((r) => ({ id: r.id, account: r.account, amount: Number(r.amount) || 0, date: r.date, description: r.description, recordedBy: r.recorded_by, createdAt: r.created_at }));
+}
+
+// Money borrowed from one account to cover a shortfall in another — e.g.
+// borrowing from Transport to cover a Library expense when Library is short.
+async function fetchAccountLoans(token) {
+  const rows = await pgFetch("account_loans?select=*&order=date.desc", token);
+  return rows.map((r) => ({
+    id: r.id, fromAccount: r.from_account, toAccount: r.to_account, amount: Number(r.amount) || 0,
+    date: r.date, description: r.description, repaidAmount: Number(r.repaid_amount) || 0, recordedBy: r.recorded_by,
+  }));
 }
 
 async function fetchSmsMessages(token) {
@@ -935,6 +957,7 @@ export default function App() {
   const [feeStructure, setFeeStructure] = useState({});
   const [otherFeeStructure, setOtherFeeStructure] = useState({});
   const [expenditures, setExpenditures] = useState([]);
+  const [accountLoans, setAccountLoans] = useState([]);
   const [smsMessages, setSmsMessages] = useState([]);
   const [staff, setStaff] = useState([]);
   const [classes, setClasses] = useState(FALLBACK_CLASSES);
@@ -989,13 +1012,14 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, smsMessageRows, visitorRows, libraryBookRows, bookIssueRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, libraryBookRows, bookIssueRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
         fetchTimetableAssignments(token), fetchTimetableSettings(token), fetchTimetableEntries(token),
         fetchStaffPayroll(token).catch(() => []), fetchPayrollSettings(token).catch(() => payrollSettings), fetchPayslips(token).catch(() => []),
         fetchExpenditures(token).catch(() => []),
+        fetchAccountLoans(token).catch(() => []),
         fetchSmsMessages(token).catch(() => []),
         fetchVisitors(token).catch(() => []),
         fetchLibraryBooks(token).catch(() => []),
@@ -1008,6 +1032,7 @@ export default function App() {
       setFeeStructure(school.feeStructure);
       setOtherFeeStructure(school.otherFeeStructure);
       setExpenditures(expenditureRows);
+      setAccountLoans(loanRows);
       setSmsMessages(smsMessageRows);
       setVisitors(visitorRows);
       setLibraryBooks(libraryBookRows);
@@ -1452,6 +1477,28 @@ export default function App() {
     await pgFetch(`expenditures?id=eq.${id}`, authedUser.accessToken, { method: "DELETE", prefer: "return=minimal" });
     setExpenditures((prev) => prev.filter((e) => e.id !== id));
   };
+  // Borrow money from one account to top up another — used when an
+  // expenditure would otherwise overdraw the chosen account.
+  const recordLoan = async (loan) => {
+    const [row] = await pgFetch("account_loans", authedUser.accessToken, {
+      method: "POST",
+      body: { from_account: loan.fromAccount, to_account: loan.toAccount, amount: loan.amount, date: loan.date, description: loan.description, recorded_by: authedUser.id },
+    });
+    const saved = { id: row.id, fromAccount: row.from_account, toAccount: row.to_account, amount: Number(row.amount), date: row.date, description: row.description, repaidAmount: Number(row.repaid_amount) || 0, recordedBy: row.recorded_by };
+    setAccountLoans((prev) => [saved, ...prev]);
+    return saved;
+  };
+  // Pay some or all of an outstanding loan back to the lending account.
+  const repayLoan = async (id, amount) => {
+    const loan = accountLoans.find((l) => l.id === id);
+    if (!loan) return;
+    const newRepaid = Math.min(loan.amount, loan.repaidAmount + amount);
+    const [row] = await pgFetch(`account_loans?id=eq.${id}`, authedUser.accessToken, {
+      method: "PATCH",
+      body: { repaid_amount: newRepaid },
+    });
+    setAccountLoans((prev) => prev.map((l) => (l.id === id ? { ...l, repaidAmount: Number(row.repaid_amount) } : l)));
+  };
 
   // Front Office — visitor log
   const addVisitor = async (visitor) => {
@@ -1639,6 +1686,7 @@ export default function App() {
   const ctx = {
     students, staff, grades, attendance, payments, feeStructure, otherFeeStructure, expenditures,
     recordExpenditure, deleteExpenditure, schoolDays,
+    accountLoans, recordLoan, repayLoan,
     smsMessages, sendBulkSms, sendBatchSms, recordSmsMessage,
     classes, subjects, schoolSettings, authedUser, isAdmin, setView,
     attendanceLanding,
@@ -3555,14 +3603,16 @@ function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePaymen
 
 // A running ledger per account: what's come in (payments), what's gone out
 // (expenditure), and the balance — the school-wide view, not per-student.
-function AccountsOverviewTab({ payments, expenditures }) {
+function AccountsOverviewTab({ payments, expenditures, accountLoans }) {
   return (
     <div className="grid grid-cols-2 gap-4" style={{ maxWidth: 760 }}>
       {PAYMENT_ACCOUNTS.map((acct) => {
         const collected = payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
         const spent = expenditures.filter((e) => e.account === acct).reduce((s, e) => s + e.amount, 0);
-        const balance = collected - spent;
+        const balance = accountBalance(acct, payments, expenditures, accountLoans);
         const isCompulsory = COMPULSORY_ACCOUNTS.includes(acct);
+        const owedToOthers = accountLoans.filter((l) => l.toAccount === acct).reduce((s, l) => s + (l.amount - l.repaidAmount), 0);
+        const owedByOthers = accountLoans.filter((l) => l.fromAccount === acct).reduce((s, l) => s + (l.amount - l.repaidAmount), 0);
         return (
           <div key={acct} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
             <div className="flex items-center justify-between mb-3">
@@ -3573,6 +3623,8 @@ function AccountsOverviewTab({ payments, expenditures }) {
               <div className="flex items-center justify-between" style={{ fontSize: 13 }}><span style={{ color: "#7A7568" }}>Collected</span><span style={{ fontFamily: MONO_FONT, color: "#2f6f4a" }}>{money(collected)}</span></div>
               <div className="flex items-center justify-between" style={{ fontSize: 13 }}><span style={{ color: "#7A7568" }}>Spent</span><span style={{ fontFamily: MONO_FONT, color: "#a1442c" }}>{money(spent)}</span></div>
               <div className="flex items-center justify-between pt-1.5" style={{ fontSize: 14, fontWeight: 700, borderTop: `1px solid ${LINE}`, marginTop: 2 }}><span>Balance</span><span style={{ fontFamily: MONO_FONT, color: balance >= 0 ? "#2f6f4a" : "#a1442c" }}>{money(balance)}</span></div>
+              {owedToOthers > 0 && <div style={{ fontSize: 11, color: "#a1702c" }}>Owes {money(owedToOthers)} (borrowed, not yet repaid)</div>}
+              {owedByOthers > 0 && <div style={{ fontSize: 11, color: "#245B91" }}>Owed {money(owedByOthers)} (lent out, not yet repaid)</div>}
             </div>
           </div>
         );
@@ -3583,21 +3635,40 @@ function AccountsOverviewTab({ payments, expenditures }) {
 
 // Recording an expense and choosing which account it's drawn from —
 // what makes the accounts above show a real balance instead of just totals.
-function ExpenditureTab({ expenditures, recordExpenditure, deleteExpenditure, showToast }) {
+function ExpenditureTab({ payments, expenditures, accountLoans, recordExpenditure, deleteExpenditure, recordLoan, repayLoan, showToast }) {
   const [form, setForm] = useState({ account: PAYMENT_ACCOUNTS[0], amount: "", date: new Date().toISOString().slice(0, 10), description: "" });
   const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState("All");
+  // When an expenditure would overdraw its account, this holds the shortfall
+  // details so we can offer to borrow from another account instead of
+  // letting the account go negative.
+  const [shortfall, setShortfall] = useState(null); // { account, amount, needed, balance }
+  const [lender, setLender] = useState(null);
+  const [borrowing, setBorrowing] = useState(false);
+  const [repayFor, setRepayFor] = useState(null);
+  const [repayAmount, setRepayAmount] = useState("");
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const doRecord = async (account, amt) => {
+    await recordExpenditure({ ...form, account, amount: amt });
+    showToast(`Recorded ${money(amt)} expenditure from ${account}`);
+    setForm((f) => ({ ...f, amount: "", description: "" }));
+    setShortfall(null);
+    setLender(null);
+  };
 
   const submit = async (e) => {
     e.preventDefault();
     const amt = Number(form.amount);
     if (!amt || amt <= 0 || !form.description.trim()) { showToast("Amount and description are required"); return; }
+    const balance = accountBalance(form.account, payments, expenditures, accountLoans);
+    if (amt > balance) {
+      setShortfall({ account: form.account, amount: amt, needed: amt - balance, balance });
+      return;
+    }
     setSaving(true);
     try {
-      await recordExpenditure({ ...form, amount: amt });
-      showToast(`Recorded ${money(amt)} expenditure from ${form.account}`);
-      setForm((f) => ({ ...f, amount: "", description: "" }));
+      await doRecord(form.account, amt);
     } catch (err) {
       showToast(err.message || "Couldn't record expenditure");
     } finally {
@@ -3605,8 +3676,30 @@ function ExpenditureTab({ expenditures, recordExpenditure, deleteExpenditure, sh
     }
   };
 
+  const lendableAccounts = shortfall
+    ? PAYMENT_ACCOUNTS.filter((a) => a !== shortfall.account)
+      .map((a) => ({ account: a, balance: accountBalance(a, payments, expenditures, accountLoans) }))
+      .filter((a) => a.balance >= shortfall.needed)
+      .sort((a, b) => b.balance - a.balance)
+    : [];
+
+  const borrowAndRecord = async () => {
+    if (!lender || !shortfall) return;
+    setBorrowing(true);
+    try {
+      await recordLoan({ fromAccount: lender, toAccount: shortfall.account, amount: shortfall.needed, date: form.date, description: `Covering: ${form.description}` });
+      await doRecord(shortfall.account, shortfall.amount);
+      showToast(`Borrowed ${money(shortfall.needed)} from ${lender} and recorded the expense`);
+    } catch (err) {
+      showToast(err.message || "Couldn't borrow and record the expense");
+    } finally {
+      setBorrowing(false);
+    }
+  };
+
   const filtered = filter === "All" ? expenditures : expenditures.filter((e) => e.account === filter);
   const totalSpent = filtered.reduce((s, e) => s + e.amount, 0);
+  const outstandingLoans = accountLoans.filter((l) => l.repaidAmount < l.amount);
 
   return (
     <div>
@@ -3619,6 +3712,35 @@ function ExpenditureTab({ expenditures, recordExpenditure, deleteExpenditure, sh
           <Field label="Description"><input value={form.description} onChange={set("description")} placeholder="What was this for?" className="focus-ring" style={{ ...inputStyle, width: 220 }} /></Field>
           <button onClick={submit} disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Record"}</button>
         </div>
+
+        {shortfall && (
+          <div style={{ marginTop: 14, padding: 14, borderRadius: 10, background: "#FBECEC", border: "1px solid #E7B9B9" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#a1442c", marginBottom: 2 }}>Not enough money in {shortfall.account}</div>
+            <div style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 10 }}>Available balance: {money(shortfall.balance)} — this expense needs {money(shortfall.needed)} more.</div>
+
+            {lender === null ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                <span style={{ fontSize: 13, fontWeight: 600 }}>Do you want to borrow from another account?</span>
+                <button onClick={() => setLender(lendableAccounts[0]?.account || "")} disabled={!lendableAccounts.length} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 7, border: "none", background: lendableAccounts.length ? ACCENT : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 12, cursor: lendableAccounts.length ? "pointer" : "not-allowed" }}>Yes</button>
+                <button onClick={() => setShortfall(null)} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>No</button>
+                {!lendableAccounts.length && <div style={{ width: "100%", fontSize: 12, color: "#a1442c", marginTop: 4 }}>No other account has enough funds ({money(shortfall.needed)}) to cover this.</div>}
+              </div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 12.5, marginBottom: 6 }}>Borrow {money(shortfall.needed)} from:</div>
+                <div className="flex gap-1.5 flex-wrap mb-3">
+                  {lendableAccounts.map((a) => (
+                    <button key={a.account} onClick={() => setLender(a.account)} className="focus-ring" style={{ padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, border: `1px solid ${lender === a.account ? "transparent" : LINE}`, background: lender === a.account ? RAIL : "#fff", color: lender === a.account ? "#fff" : "#5b5747", cursor: "pointer" }}>{a.account} ({money(a.balance)})</button>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={borrowAndRecord} disabled={borrowing} className="focus-ring" style={{ padding: "7px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12, cursor: borrowing ? "wait" : "pointer" }}>{borrowing ? "Borrowing…" : `Borrow & Record Expense`}</button>
+                  <button onClick={() => { setLender(null); setShortfall(null); }} className="focus-ring" style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between mb-3">
@@ -3630,7 +3752,7 @@ function ExpenditureTab({ expenditures, recordExpenditure, deleteExpenditure, sh
         <span style={{ fontSize: 12.5, fontWeight: 700, color: "#a1442c" }}>Total: {money(totalSpent)}</span>
       </div>
 
-      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 20 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 2fr 1fr 0.5fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
           <span>Date</span><span>Account</span><span>Description</span><span>Amount</span><span></span>
         </div>
@@ -3644,6 +3766,39 @@ function ExpenditureTab({ expenditures, recordExpenditure, deleteExpenditure, sh
           </div>
         ))}
         {filtered.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No expenditure recorded yet.</div>}
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Borrowed Between Accounts</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        {outstandingLoans.length === 0 && <div className="text-center py-8" style={{ color: "#a39c86", fontSize: 13 }}>No outstanding loans between accounts.</div>}
+        {outstandingLoans.map((l) => {
+          const owing = l.amount - l.repaidAmount;
+          return (
+            <div key={l.id} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", padding: "9px 16px", fontSize: 12.5, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+              <span>{l.date}</span>
+              <span><b>{l.toAccount}</b> owes <b>{l.fromAccount}</b></span>
+              <span style={{ color: "#6b6656" }}>{l.description}</span>
+              <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: "#a1702c" }}>{money(owing)} left</span>
+              {repayFor === l.id ? (
+                <div className="flex items-center gap-1.5">
+                  <input type="number" min={1} max={owing} value={repayAmount} onChange={(e) => setRepayAmount(e.target.value)} placeholder="Amount" className="focus-ring" style={{ width: 80, padding: "4px 6px", borderRadius: 6, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12 }} />
+                  <button
+                    onClick={async () => {
+                      const amt = Math.min(owing, Number(repayAmount) || 0);
+                      if (amt <= 0) return;
+                      await repayLoan(l.id, amt);
+                      showToast(`${l.toAccount} repaid ${money(amt)} to ${l.fromAccount}`);
+                      setRepayFor(null); setRepayAmount("");
+                    }}
+                    className="focus-ring" style={{ padding: "5px 10px", borderRadius: 6, border: "none", background: ACCENT, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                  >Pay</button>
+                </div>
+              ) : (
+                <button onClick={() => { setRepayFor(l.id); setRepayAmount(String(owing)); }} className="focus-ring" style={{ justifySelf: "start", padding: "5px 12px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Repay</button>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -5324,7 +5479,7 @@ function printDocument(title, bodyHtml, pageSize) {
       body { font-family: Georgia, serif; padding: ${pageSize ? "14px" : "32px"}; color: #1E2333; }
       table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
       th, td { border: 1px solid #ccc; padding: ${pageSize ? "4px 8px" : "6px 10px"}; text-align: left; }
-      th { background: #f2efe6; }
+      th { background: #EAE2C8; color: #2b2b2b; font-weight: 700; }
       .header { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
       .header img { width: 48px; height: 48px; object-fit: cover; border-radius: 8px; }
       .school-name { font-size: 20px; font-weight: 700; }
@@ -6295,12 +6450,13 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead>
-              <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
-                <th style={{ padding: "6px 8px" }}>Pos</th><th style={{ padding: "6px 8px" }}>Name</th>
-                {subjects.map((s) => <th key={s} style={{ padding: "6px 8px" }} title={s}>{subjectAbbr(s)}</th>)}
-                <th style={{ padding: "6px 8px" }}>Total %</th>
-                <th style={{ padding: "6px 8px" }}>Average %</th>
-                {system && <th style={{ padding: "6px 8px" }}>Level</th>}
+              <tr style={{ textAlign: "left", background: "#EFE9D8", borderBottom: `2px solid ${LINE}` }}>
+                <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Pos</th>
+                <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Name</th>
+                {subjects.map((s) => <th key={s} style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }} title={s}>{subjectAbbr(s)}</th>)}
+                <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Total %</th>
+                <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Average %</th>
+                {system && <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Level</th>}
               </tr>
             </thead>
             <tbody>
@@ -6503,8 +6659,8 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
       </div>
 
       <table style="margin-top:14px;">
-        <thead><tr style="background:${REPORT_TEAL}; color:#fff;">
-          <th>Learning Area</th><th>Marks</th><th>% Score</th><th>Rank</th><th>Points</th><th>Comments</th><th>Instructor</th>
+        <thead><tr>
+          ${["Learning Area", "Marks", "% Score", "Rank", "Points", "Comments", "Instructor"].map((h) => `<th style="background:${REPORT_TEAL};color:#fff;">${h}</th>`).join("")}
         </tr></thead>
         <tbody>
           ${summary.subjects.map((subj) => {
@@ -6609,8 +6765,10 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
-                <tr style={{ textAlign: "left", borderBottom: `1px solid ${LINE}`, fontSize: 11, color: "#8a8474", textTransform: "uppercase" }}>
-                  <th style={{ padding: "6px 8px" }}>Subject</th><th style={{ padding: "6px 8px" }}>Marks</th><th style={{ padding: "6px 8px" }}>%</th><th style={{ padding: "6px 8px" }}>Rank</th><th style={{ padding: "6px 8px" }}>Points</th><th style={{ padding: "6px 8px" }}>Comment</th><th style={{ padding: "6px 8px" }}>Instructor</th>
+                <tr style={{ textAlign: "left", background: "#EFE9D8", borderBottom: `2px solid ${LINE}` }}>
+                  {["Subject", "Marks", "%", "Rank", "Points", "Comment", "Instructor"].map((h) => (
+                    <th key={h} style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
