@@ -381,16 +381,55 @@ async function fetchSmsMessages(token) {
  *  FRONT OFFICE — Receptionist logs visitors (name, reason, date,
  *  comments). Admin can see it too.
  * ---------------------------------------------------------------------- */
+function mapVisitorRow(r) {
+  return {
+    id: r.id, name: r.visitor_name, reason: r.reason, date: r.visit_date, comments: r.comments || "",
+    followUp: r.follow_up || "", followUpDate: r.follow_up_date || "", reminderDate: r.reminder_date || "",
+    recordedBy: r.recorded_by, createdAt: r.created_at,
+  };
+}
 async function fetchVisitors(token) {
   const rows = await pgFetch("visitors?select=*&order=visit_date.desc,created_at.desc", token);
-  return rows.map((r) => ({ id: r.id, name: r.visitor_name, reason: r.reason, date: r.visit_date, comments: r.comments || "", recordedBy: r.recorded_by, createdAt: r.created_at }));
+  return rows.map(mapVisitorRow);
 }
 async function addVisitorRow(token, visitor, recordedBy) {
   const [row] = await pgFetch("visitors", token, {
     method: "POST",
-    body: { visitor_name: visitor.name, reason: visitor.reason, visit_date: visitor.date, comments: visitor.comments || null, recorded_by: recordedBy },
+    body: {
+      visitor_name: visitor.name, reason: visitor.reason, visit_date: visitor.date, comments: visitor.comments || null,
+      follow_up: visitor.followUp || null, follow_up_date: visitor.followUpDate || null, reminder_date: visitor.reminderDate || null,
+      recorded_by: recordedBy,
+    },
   });
-  return { id: row.id, name: row.visitor_name, reason: row.reason, date: row.visit_date, comments: row.comments || "", recordedBy: row.recorded_by, createdAt: row.created_at };
+  return mapVisitorRow(row);
+}
+async function updateVisitorFollowUp(token, id, followUp) {
+  const [row] = await pgFetch(`visitors?id=eq.${id}`, token, {
+    method: "PATCH",
+    body: { follow_up: followUp.followUp || null, follow_up_date: followUp.followUpDate || null, reminder_date: followUp.reminderDate || null },
+  });
+  return mapVisitorRow(row);
+}
+
+/* ---------------------------------------------------------------------- *
+ *  FRONT OFFICE — Appointments book (who it's with, when, and why).
+ * ---------------------------------------------------------------------- */
+function mapAppointmentRow(r) {
+  return { id: r.id, withWhom: r.with_whom, purpose: r.purpose || "", date: r.appointment_date, time: r.appointment_time ? r.appointment_time.slice(0, 5) : "", notes: r.notes || "", recordedBy: r.recorded_by, createdAt: r.created_at };
+}
+async function fetchAppointments(token) {
+  const rows = await pgFetch("appointments?select=*&order=appointment_date.asc,appointment_time.asc", token);
+  return rows.map(mapAppointmentRow);
+}
+async function addAppointmentRow(token, appt, recordedBy) {
+  const [row] = await pgFetch("appointments", token, {
+    method: "POST",
+    body: { with_whom: appt.withWhom, purpose: appt.purpose || null, appointment_date: appt.date, appointment_time: appt.time || null, notes: appt.notes || null, recorded_by: recordedBy },
+  });
+  return mapAppointmentRow(row);
+}
+async function deleteAppointmentRow(token, id) {
+  await pgFetch(`appointments?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
 }
 
 /* ---------------------------------------------------------------------- *
@@ -979,6 +1018,7 @@ export default function App() {
   });
   const [payslips, setPayslips] = useState([]);
   const [visitors, setVisitors] = useState([]);
+  const [appointments, setAppointments] = useState([]);
   const [libraryBooks, setLibraryBooks] = useState([]);
   const [bookIssues, setBookIssues] = useState([]);
   const [view, setView] = useState("dashboard");
@@ -1012,7 +1052,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, libraryBookRows, bookIssueRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1022,6 +1062,7 @@ export default function App() {
         fetchAccountLoans(token).catch(() => []),
         fetchSmsMessages(token).catch(() => []),
         fetchVisitors(token).catch(() => []),
+        fetchAppointments(token).catch(() => []),
         fetchLibraryBooks(token).catch(() => []),
         fetchBookIssues(token).catch(() => []),
       ]);
@@ -1035,6 +1076,7 @@ export default function App() {
       setAccountLoans(loanRows);
       setSmsMessages(smsMessageRows);
       setVisitors(visitorRows);
+      setAppointments(appointmentRows);
       setLibraryBooks(libraryBookRows);
       setBookIssues(bookIssueRows);
       setStaff(staffRows);
@@ -1505,6 +1547,20 @@ export default function App() {
     const row = await addVisitorRow(authedUser.accessToken, visitor, authedUser.id);
     setVisitors((prev) => [row, ...prev]);
   };
+  const setVisitorFollowUp = async (id, followUp) => {
+    const row = await updateVisitorFollowUp(authedUser.accessToken, id, followUp);
+    setVisitors((prev) => prev.map((v) => (v.id === id ? row : v)));
+  };
+
+  // Front Office — appointments book
+  const addAppointment = async (appt) => {
+    const row = await addAppointmentRow(authedUser.accessToken, appt, authedUser.id);
+    setAppointments((prev) => [...prev, row].sort((a, b) => (a.date + (a.time || "")).localeCompare(b.date + (b.time || ""))));
+  };
+  const deleteAppointment = async (id) => {
+    await deleteAppointmentRow(authedUser.accessToken, id);
+    setAppointments((prev) => prev.filter((a) => a.id !== id));
+  };
 
   // Library — books + issue/return
   const addLibraryBook = async (book) => {
@@ -1696,7 +1752,8 @@ export default function App() {
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
     generateLessonPlan,
-    visitors, addVisitor,
+    visitors, addVisitor, setVisitorFollowUp,
+    appointments, addAppointment, deleteAppointment,
     libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook,
     addStudent, deleteStudent, updateStudent, promoteClassStudents, addStaff, markAttendance, setGrade, saveGrade, recordPayment, recordPaymentBatch, showToast,
     addClass, removeClass, addSubject, removeSubject, updateSchoolSettings, setClassFee,
@@ -2564,14 +2621,17 @@ function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
 /* ---------------------------------------------------------------------- *
  *  RECEPTIONIST DASHBOARD — today's visitor traffic at a glance
  * ---------------------------------------------------------------------- */
-function ReceptionistDashboard({ visitors, setView }) {
+function ReceptionistDashboard({ visitors, appointments, setView }) {
   const todayStr = new Date().toISOString().slice(0, 10);
   const todaysVisitors = visitors.filter((v) => v.date === todayStr);
   const recent = [...visitors].slice(0, 6);
+  const dueFollowUps = visitors.filter((v) => v.reminderDate && v.reminderDate <= todayStr);
+  const todaysAppointments = appointments.filter((a) => a.date === todayStr);
 
   const cards = [
     { label: "Visitors today", value: todaysVisitors.length, sub: todayStr, icon: Contact, bg: "#EAF3FF", tone: "#245B91" },
-    { label: "Total logged", value: visitors.length, sub: "All time", icon: Users, bg: "#EEF8F0", tone: "#2F6F4A" },
+    { label: "Appointments today", value: todaysAppointments.length, sub: "Booked for today", icon: CalendarDays, bg: "#F6F0FF", tone: "#6B4FA1" },
+    { label: "Follow-ups due", value: dueFollowUps.length, sub: dueFollowUps.length ? "Need attention" : "All caught up", icon: AlertTriangle, bg: "#F8ECF0", tone: dueFollowUps.length ? "#A1442C" : "#2F6F4A" },
   ];
 
   return (
@@ -2595,6 +2655,31 @@ function ReceptionistDashboard({ visitors, setView }) {
             <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
           </div>
         ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#FFF7EA", marginTop: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Visitor follow-ups due today or overdue</div></div>
+          <AlertTriangle size={18} color="#A1702C" />
+        </div>
+        {dueFollowUps.length ? dueFollowUps.map((v) => (
+          <div key={v.id} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px", marginBottom: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{v.name} — {v.followUp}</span>
+            <button onClick={() => setView("frontoffice")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Review</button>
+          </div>
+        )) : <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>No follow-ups due — nothing pending right now.</div>}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#F6F0FF", marginTop: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#6B4FA1", textTransform: "uppercase" }}>Today's Appointments</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Who's booked in today</div></div>
+          <CalendarDays size={18} color="#6B4FA1" />
+        </div>
+        {todaysAppointments.length ? todaysAppointments.map((a) => (
+          <div key={a.id} className="dashboard-event-card" style={{ background: "rgba(255,255,255,.72)", marginBottom: 8 }}>
+            <div className="flex items-start justify-between gap-3"><div><b style={{ fontSize: 13 }}>{a.withWhom}</b><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>{a.purpose || "—"}</div></div><span style={{ fontSize: 10, fontWeight: 700, color: "#6B4FA1", background: "#fff", padding: "4px 7px", borderRadius: 999 }}>{a.time || "—"}</span></div>
+          </div>
+        )) : <div style={{ fontSize: 12, color: "#7A7568", padding: "12px 0" }}>No appointments booked for today.</div>}
       </div>
 
       <div className="dashboard-section" style={{ background: "#EEF5FF", marginTop: 14 }}>
@@ -6818,10 +6903,14 @@ function fmtClockTime(iso) {
 /* ---------------------------------------------------------------------- *
  *  FRONT OFFICE — Receptionist logs visitors (name, reason, date, comments)
  * ---------------------------------------------------------------------- */
-function FrontOfficeView({ visitors, addVisitor, showToast }) {
+function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, appointments, addAppointment, deleteAppointment, showToast }) {
   const [form, setForm] = useState({ name: "", reason: "", date: new Date().toISOString().slice(0, 10), comments: "" });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  // Which visitor's follow-up row is currently being edited.
+  const [editingId, setEditingId] = useState(null);
+  const [followForm, setFollowForm] = useState({ followUp: "", followUpDate: "", reminderDate: "" });
 
   const submit = async (e) => {
     e.preventDefault();
@@ -6838,10 +6927,26 @@ function FrontOfficeView({ visitors, addVisitor, showToast }) {
     }
   };
 
+  const startFollowUp = (v) => {
+    setEditingId(v.id);
+    setFollowForm({ followUp: v.followUp || "", followUpDate: v.followUpDate || "", reminderDate: v.reminderDate || "" });
+  };
+  const saveFollowUp = async (id) => {
+    try {
+      await setVisitorFollowUp(id, followForm);
+      showToast("Follow-up saved");
+      setEditingId(null);
+    } catch (err) {
+      showToast(err.message || "Couldn't save follow-up");
+    }
+  };
+
+  const todayStr = new Date().toISOString().slice(0, 10);
+
   return (
-    <div className="px-7 py-6" style={{ maxWidth: 980 }}>
+    <div className="px-7 py-6" style={{ maxWidth: 1020 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Front Office</h2>
-      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Record visitors as they arrive — name, reason for visiting, and any notes.</p>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Record visitors as they arrive, track follow-ups, and keep an appointments book.</p>
 
       <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
         <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Log a visitor</h3>
@@ -6854,19 +6959,99 @@ function FrontOfficeView({ visitors, addVisitor, showToast }) {
         </div>
       </form>
 
-      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr 1fr 1.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-          <span>Date</span><span>Visitor</span><span>Reason</span><span>Comments</span>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Visitor Log</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 28 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Date</span><span>Visitor</span><span>Reason</span><span>Follow-up</span><span></span>
         </div>
-        {visitors.map((v) => (
-          <div key={v.id} style={{ display: "grid", gridTemplateColumns: "1fr 1.6fr 1fr 1.6fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
-            <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{v.date}</span>
-            <span style={{ fontWeight: 600 }}>{v.name}</span>
-            <span>{v.reason}</span>
-            <span style={{ color: "#6b6656" }}>{v.comments || "—"}</span>
+        {visitors.map((v) => {
+          const reminderDue = v.reminderDate && v.reminderDate <= todayStr;
+          return (
+            <div key={v.id} style={{ borderBottom: `1px solid ${LINE}` }}>
+              <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr", padding: "9px 16px", fontSize: 13, alignItems: "center" }}>
+                <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{v.date}</span>
+                <span style={{ fontWeight: 600 }}>{v.name}</span>
+                <span>{v.reason}</span>
+                {v.followUp ? (
+                  <span style={{ fontSize: 12 }}>
+                    {v.followUp}
+                    {v.followUpDate && <span style={{ color: "#6b6656" }}> — by {v.followUpDate}</span>}
+                    {reminderDue && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#a1442c", background: "#FBECEC", borderRadius: 999, padding: "2px 7px" }}>REMINDER DUE</span>}
+                  </span>
+                ) : <span style={{ color: "#c4bda7", fontSize: 12 }}>No follow-up set</span>}
+                <button onClick={() => startFollowUp(v)} className="focus-ring" style={{ justifySelf: "end", padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{v.followUp ? "Edit" : "Add"}</button>
+              </div>
+              {editingId === v.id && (
+                <div className="flex items-end gap-3 flex-wrap" style={{ padding: "0 16px 14px" }}>
+                  <Field label="Follow up"><input value={followForm.followUp} onChange={(e) => setFollowForm((f) => ({ ...f, followUp: e.target.value }))} placeholder="What needs following up?" className="focus-ring" style={{ ...inputStyle, width: 240 }} /></Field>
+                  <Field label="Follow-up date"><input type="date" value={followForm.followUpDate} onChange={(e) => setFollowForm((f) => ({ ...f, followUpDate: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+                  <Field label="Reminder date"><input type="date" value={followForm.reminderDate} onChange={(e) => setFollowForm((f) => ({ ...f, reminderDate: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+                  <button onClick={() => saveFollowUp(v.id)} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Save</button>
+                  <button onClick={() => setEditingId(null)} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {visitors.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No visitors logged yet.</div>}
+      </div>
+
+      <AppointmentsBook appointments={appointments} addAppointment={addAppointment} deleteAppointment={deleteAppointment} showToast={showToast} />
+    </div>
+  );
+}
+
+function AppointmentsBook({ appointments, addAppointment, deleteAppointment, showToast }) {
+  const [form, setForm] = useState({ withWhom: "", purpose: "", date: new Date().toISOString().slice(0, 10), time: "", notes: "" });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+  const todayStr = new Date().toISOString().slice(0, 10);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.withWhom.trim() || !form.date) { showToast("Who the appointment is with, and a date, are required"); return; }
+    setSaving(true);
+    try {
+      await addAppointment(form);
+      showToast(`Booked appointment with ${form.withWhom}`);
+      setForm({ withWhom: "", purpose: "", date: new Date().toISOString().slice(0, 10), time: "", notes: "" });
+    } catch (err) {
+      showToast(err.message || "Couldn't book appointment");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div>
+      <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Book an appointment</h3>
+        <div className="flex items-end gap-3 flex-wrap">
+          <Field label="With whom"><input value={form.withWhom} onChange={set("withWhom")} placeholder="e.g. Mr. Otieno (parent)" className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
+          <Field label="Date"><input type="date" value={form.date} onChange={set("date")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+          <Field label="Time"><input type="time" value={form.time} onChange={set("time")} className="focus-ring" style={{ ...inputStyle, width: 120 }} /></Field>
+          <Field label="Purpose"><input value={form.purpose} onChange={set("purpose")} placeholder="e.g. Discuss fees" className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
+          <Field label="Notes"><input value={form.notes} onChange={set("notes")} placeholder="Optional" className="focus-ring" style={{ ...inputStyle, width: 180 }} /></Field>
+          <button type="submit" disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Book Appointment"}</button>
+        </div>
+      </form>
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Appointments</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "0.8fr 0.6fr 1.2fr 1.4fr 1.2fr 0.5fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Date</span><span>Time</span><span>With</span><span>Purpose</span><span>Notes</span><span></span>
+        </div>
+        {appointments.map((a) => (
+          <div key={a.id} style={{ display: "grid", gridTemplateColumns: "0.8fr 0.6fr 1.2fr 1.4fr 1.2fr 0.5fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12, fontWeight: a.date === todayStr ? 700 : 400, color: a.date === todayStr ? ACCENT : INK }}>{a.date}{a.date === todayStr ? " (today)" : ""}</span>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{a.time || "—"}</span>
+            <span style={{ fontWeight: 600 }}>{a.withWhom}</span>
+            <span style={{ color: "#6b6656" }}>{a.purpose || "—"}</span>
+            <span style={{ color: "#6b6656" }}>{a.notes || "—"}</span>
+            <button onClick={() => { if (window.confirm("Cancel this appointment?")) deleteAppointment(a.id); }} className="focus-ring" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer", justifySelf: "end" }}><Trash2 size={14} /></button>
           </div>
         ))}
-        {visitors.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No visitors logged yet.</div>}
+        {appointments.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No appointments booked yet.</div>}
       </div>
     </div>
   );
