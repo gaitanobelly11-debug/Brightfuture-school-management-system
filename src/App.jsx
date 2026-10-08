@@ -436,16 +436,19 @@ async function deleteAppointmentRow(token, id) {
  *  LIBRARY — Librarian adds/tracks books and their issue/return status.
  *  Admin can see it too.
  * ---------------------------------------------------------------------- */
+function mapLibraryBookRow(r) {
+  return { id: r.id, title: r.title, author: r.author || "", isbn: r.isbn || "", category: r.category || "", totalCopies: r.total_copies, availableCopies: r.available_copies, coverUrl: r.cover_url || "", addedBy: r.added_by, createdAt: r.created_at };
+}
 async function fetchLibraryBooks(token) {
   const rows = await pgFetch("library_books?select=*&order=title", token);
-  return rows.map((r) => ({ id: r.id, title: r.title, author: r.author || "", isbn: r.isbn || "", category: r.category || "", totalCopies: r.total_copies, availableCopies: r.available_copies, addedBy: r.added_by, createdAt: r.created_at }));
+  return rows.map(mapLibraryBookRow);
 }
 async function addLibraryBookRow(token, book, addedBy) {
   const [row] = await pgFetch("library_books", token, {
     method: "POST",
-    body: { title: book.title, author: book.author || null, isbn: book.isbn || null, category: book.category || null, total_copies: book.totalCopies, available_copies: book.totalCopies, added_by: addedBy },
+    body: { title: book.title, author: book.author || null, isbn: book.isbn || null, category: book.category || null, total_copies: book.totalCopies, available_copies: book.totalCopies, cover_url: book.coverUrl || null, added_by: addedBy },
   });
-  return { id: row.id, title: row.title, author: row.author || "", isbn: row.isbn || "", category: row.category || "", totalCopies: row.total_copies, availableCopies: row.available_copies, addedBy: row.added_by, createdAt: row.created_at };
+  return mapLibraryBookRow(row);
 }
 async function deleteLibraryBookRow(token, id) {
   await pgFetch(`library_books?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
@@ -453,16 +456,27 @@ async function deleteLibraryBookRow(token, id) {
 async function updateLibraryBookCopiesRow(token, id, availableCopies) {
   await pgFetch(`library_books?id=eq.${id}`, token, { method: "PATCH", body: { available_copies: availableCopies }, prefer: "return=minimal" });
 }
+function mapBookIssueRow(r) {
+  return {
+    id: r.id, bookId: r.book_id, borrowerType: r.borrower_type || "Student", borrowerName: r.borrower_name, borrowerClass: r.borrower_class || "",
+    studentId: r.student_id ?? null, staffId: r.staff_id || null,
+    issuedDate: r.issued_date, dueDate: r.due_date, reminderDate: r.reminder_date || "", returnedDate: r.returned_date, status: r.status, issuedBy: r.issued_by,
+  };
+}
 async function fetchBookIssues(token) {
   const rows = await pgFetch("book_issues?select=*&order=issued_date.desc", token);
-  return rows.map((r) => ({ id: r.id, bookId: r.book_id, borrowerName: r.borrower_name, borrowerClass: r.borrower_class || "", issuedDate: r.issued_date, dueDate: r.due_date, returnedDate: r.returned_date, status: r.status, issuedBy: r.issued_by }));
+  return rows.map(mapBookIssueRow);
 }
 async function issueBookRow(token, issue, issuedBy) {
   const [row] = await pgFetch("book_issues", token, {
     method: "POST",
-    body: { book_id: issue.bookId, borrower_name: issue.borrowerName, borrower_class: issue.borrowerClass || null, issued_date: issue.issuedDate, due_date: issue.dueDate || null, status: "Issued", issued_by: issuedBy },
+    body: {
+      book_id: issue.bookId, borrower_type: issue.borrowerType || "Student", borrower_name: issue.borrowerName, borrower_class: issue.borrowerClass || null,
+      student_id: issue.studentId || null, staff_id: issue.staffId || null,
+      issued_date: issue.issuedDate, due_date: issue.dueDate || null, reminder_date: issue.reminderDate || null, status: "Issued", issued_by: issuedBy,
+    },
   });
-  return { id: row.id, bookId: row.book_id, borrowerName: row.borrower_name, borrowerClass: row.borrower_class || "", issuedDate: row.issued_date, dueDate: row.due_date, returnedDate: row.returned_date, status: row.status, issuedBy: row.issued_by };
+  return mapBookIssueRow(row);
 }
 async function returnBookRow(token, id, returnedDate) {
   await pgFetch(`book_issues?id=eq.${id}`, token, { method: "PATCH", body: { status: "Returned", returned_date: returnedDate }, prefer: "return=minimal" });
@@ -2561,6 +2575,7 @@ function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
   const totalCopies = libraryBooks.reduce((s, b) => s + b.totalCopies, 0);
   const outstanding = bookIssues.filter((i) => i.status !== "Returned");
   const overdue = outstanding.filter((i) => i.dueDate && i.dueDate < todayStr);
+  const reminders = outstanding.filter((i) => i.reminderDate && i.reminderDate <= todayStr && (!i.dueDate || i.dueDate >= todayStr));
   const bookTitle = (id) => libraryBooks.find((b) => b.id === id)?.title || "—";
 
   const cards = [
@@ -2594,12 +2609,12 @@ function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
           <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Books that need following up</div></div>
           <AlertTriangle size={18} color="#A1702C" />
         </div>
-        {overdue.length ? overdue.slice(0, 6).map((i) => (
+        {overdue.length || reminders.length ? [...overdue, ...reminders].slice(0, 6).map((i) => (
           <div key={i.id} className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px", marginBottom: 7 }}>
-            <span style={{ fontSize: 13, fontWeight: 600 }}>{bookTitle(i.bookId)} — {i.borrowerName}, due {i.dueDate}</span>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{bookTitle(i.bookId)} — {i.borrowerName}{i.dueDate && i.dueDate < todayStr ? `, overdue since ${i.dueDate}` : `, due ${i.dueDate || "—"}`}</span>
             <button onClick={() => setView("library")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Review</button>
           </div>
-        )) : <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>No overdue books — nothing pending right now.</div>}
+        )) : <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>No overdue books or reminders — nothing pending right now.</div>}
       </div>
 
       <div className="dashboard-section" style={{ background: "#F6F0FF" }}>
@@ -7060,22 +7075,37 @@ function AppointmentsBook({ appointments, addAppointment, deleteAppointment, sho
 /* ---------------------------------------------------------------------- *
  *  LIBRARY — Librarian adds books and tracks issue/return
  * ---------------------------------------------------------------------- */
-function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook, showToast }) {
+function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook, showToast, students, staff, classes, uploadPhoto }) {
   const [tab, setTab] = useState("books");
   const [bookForm, setBookForm] = useState({ title: "", author: "", isbn: "", category: "", totalCopies: 1 });
-  const [issueForm, setIssueForm] = useState({ bookId: "", borrowerName: "", borrowerClass: "", issuedDate: new Date().toISOString().slice(0, 10), dueDate: "" });
+  const [coverFile, setCoverFile] = useState(null);
+  const [coverPreview, setCoverPreview] = useState("");
+  const [issueForm, setIssueForm] = useState({
+    bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "",
+    issuedDate: new Date().toISOString().slice(0, 10), dueDate: "", reminderDate: "",
+  });
   const [saving, setSaving] = useState(false);
   const setB = (k) => (e) => setBookForm((f) => ({ ...f, [k]: e.target.value }));
   const setI = (k) => (e) => setIssueForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const onCoverChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCoverFile(file);
+    setCoverPreview(URL.createObjectURL(file));
+  };
 
   const submitBook = async (e) => {
     e.preventDefault();
     if (!bookForm.title.trim()) { showToast("Book title is required"); return; }
     setSaving(true);
     try {
-      await addLibraryBook({ ...bookForm, totalCopies: Number(bookForm.totalCopies) || 1 });
+      let coverUrl = "";
+      if (coverFile) coverUrl = await uploadPhoto(coverFile, "library");
+      await addLibraryBook({ ...bookForm, totalCopies: Number(bookForm.totalCopies) || 1, coverUrl });
       showToast(`Added "${bookForm.title}" to the library`);
       setBookForm({ title: "", author: "", isbn: "", category: "", totalCopies: 1 });
+      setCoverFile(null); setCoverPreview("");
     } catch (err) {
       showToast(err.message || "Couldn't add book");
     } finally {
@@ -7083,15 +7113,31 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
     }
   };
 
+  // Picking a borrower type resets whichever fields don't apply, so a
+  // half-filled previous selection can't leak into the new one.
+  const setBorrowerType = (type) => setIssueForm((f) => ({ ...f, borrowerType: type, studentId: "", staffId: "", borrowerName: "", borrowerClass: "" }));
+  const pickStudent = (e) => {
+    const s = students.find((x) => String(x.id) === e.target.value);
+    setIssueForm((f) => ({ ...f, studentId: s ? s.id : "", borrowerName: s ? s.name : "", borrowerClass: s ? s.class : "" }));
+  };
+  const pickStaff = (e) => {
+    const s = staff.find((x) => x.id === e.target.value);
+    setIssueForm((f) => ({ ...f, staffId: s ? s.id : "", borrowerName: s ? s.name : "" }));
+  };
+  const pickClass = (e) => {
+    const c = e.target.value;
+    setIssueForm((f) => ({ ...f, borrowerClass: c, borrowerName: c ? `${c} (whole class)` : "" }));
+  };
+
   const submitIssue = async (e) => {
     e.preventDefault();
-    if (!issueForm.bookId || !issueForm.borrowerName.trim()) { showToast("Pick a book and borrower name"); return; }
+    if (!issueForm.bookId || !issueForm.borrowerName.trim()) { showToast("Pick a book and a borrower"); return; }
     setSaving(true);
     try {
       await issueBook(issueForm);
       const book = libraryBooks.find((b) => b.id === issueForm.bookId);
       showToast(`Issued "${book?.title}" to ${issueForm.borrowerName}`);
-      setIssueForm({ bookId: "", borrowerName: "", borrowerClass: "", issuedDate: new Date().toISOString().slice(0, 10), dueDate: "" });
+      setIssueForm({ bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "", issuedDate: new Date().toISOString().slice(0, 10), dueDate: "", reminderDate: "" });
     } catch (err) {
       showToast(err.message || "Couldn't issue book");
     } finally {
@@ -7101,11 +7147,12 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
 
   const bookTitle = (id) => libraryBooks.find((b) => b.id === id)?.title || "—";
   const outstanding = bookIssues.filter((i) => i.status !== "Returned");
+  const todayStr = new Date().toISOString().slice(0, 10);
 
   return (
-    <div className="px-7 py-6" style={{ maxWidth: 1040 }}>
+    <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Library</h2>
-      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Add books to the catalogue, issue them, and track returns.</p>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Add books to the catalogue, issue them to students, staff, or a whole class, and track returns.</p>
 
       <div className="flex gap-1 mb-5" style={{ borderBottom: `1px solid ${LINE}` }}>
         <button onClick={() => setTab("books")} className="focus-ring" style={{ padding: "8px 14px", background: "none", border: "none", borderBottom: tab === "books" ? `2px solid ${ACCENT}` : "2px solid transparent", fontSize: 13, fontWeight: 600, color: tab === "books" ? INK : "#9a9484", cursor: "pointer" }}>Books</button>
@@ -7117,6 +7164,12 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
           <form onSubmit={submitBook} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
             <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Add a book</h3>
             <div className="flex items-end gap-3 flex-wrap">
+              <Field label="Cover">
+                <label style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 54, height: 54, borderRadius: 8, border: `1px dashed ${LINE}`, cursor: "pointer", overflow: "hidden", background: "#fff" }}>
+                  {coverPreview ? <img src={coverPreview} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <ImagePlus size={18} color="#a39c86" />}
+                  <input type="file" accept="image/*" onChange={onCoverChange} style={{ display: "none" }} />
+                </label>
+              </Field>
               <Field label="Title"><input value={bookForm.title} onChange={setB("title")} className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
               <Field label="Author"><input value={bookForm.author} onChange={setB("author")} className="focus-ring" style={{ ...inputStyle, width: 160 }} /></Field>
               <Field label="Category"><input value={bookForm.category} onChange={setB("category")} placeholder="e.g. Fiction" className="focus-ring" style={{ ...inputStyle, width: 140 }} /></Field>
@@ -7127,11 +7180,14 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
           </form>
 
           <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1.2fr 1fr 1fr 0.5fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-              <span>Title</span><span>Author</span><span>Category</span><span>Available</span><span></span>
+            <div style={{ display: "grid", gridTemplateColumns: "0.5fr 1.4fr 1.1fr 1fr 1fr 0.5fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+              <span></span><span>Title</span><span>Author</span><span>Category</span><span>Available</span><span></span>
             </div>
             {libraryBooks.map((b) => (
-              <div key={b.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 1.2fr 1fr 1fr 0.5fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+              <div key={b.id} style={{ display: "grid", gridTemplateColumns: "0.5fr 1.4fr 1.1fr 1fr 1fr 0.5fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+                <span style={{ width: 36, height: 36, borderRadius: 6, overflow: "hidden", background: "#EFE9D8", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {b.coverUrl ? <img src={b.coverUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <BookOpen size={16} color="#a39c86" />}
+                </span>
                 <span style={{ fontWeight: 600 }}>{b.title}</span>
                 <span style={{ color: "#6b6656" }}>{b.author || "—"}</span>
                 <span>{b.category || "—"}</span>
@@ -7146,32 +7202,74 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
         <>
           <form onSubmit={submitIssue} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
             <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Issue a book</h3>
+            <div className="flex items-end gap-3 flex-wrap mb-3">
+              <Field label="Book"><select value={issueForm.bookId} onChange={setI("bookId")} className="focus-ring" style={{ ...inputStyle, width: 220 }}><option value="">Select a book…</option>{libraryBooks.filter((b) => b.availableCopies > 0).map((b) => <option key={b.id} value={b.id}>{b.title} ({b.availableCopies} left)</option>)}</select></Field>
+              <Field label="Borrower is a">
+                <div className="flex gap-1.5">
+                  {["Student", "Staff", "Class"].map((t) => (
+                    <button key={t} type="button" onClick={() => setBorrowerType(t)} className="focus-ring" style={{ padding: "8px 12px", borderRadius: 8, fontSize: 12.5, fontWeight: 600, border: `1px solid ${issueForm.borrowerType === t ? "transparent" : LINE}`, background: issueForm.borrowerType === t ? RAIL : "#fff", color: issueForm.borrowerType === t ? "#fff" : "#5b5747", cursor: "pointer" }}>{t === "Class" ? "Whole Class" : t}</button>
+                  ))}
+                </div>
+              </Field>
+              {issueForm.borrowerType === "Student" && (
+                <Field label="Student">
+                  <select value={issueForm.studentId} onChange={pickStudent} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
+                    <option value="">Select a student…</option>
+                    {students.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.class})</option>)}
+                  </select>
+                </Field>
+              )}
+              {issueForm.borrowerType === "Staff" && (
+                <Field label="Staff">
+                  <select value={issueForm.staffId} onChange={pickStaff} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
+                    <option value="">Select a staff member…</option>
+                    {staff.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.role})</option>)}
+                  </select>
+                </Field>
+              )}
+              {issueForm.borrowerType === "Class" && (
+                <Field label="Class">
+                  <select value={issueForm.borrowerClass} onChange={pickClass} className="focus-ring" style={{ ...inputStyle, width: 180 }}>
+                    <option value="">Select a class…</option>
+                    {classes.map((c) => <option key={c}>{c}</option>)}
+                  </select>
+                </Field>
+              )}
+            </div>
             <div className="flex items-end gap-3 flex-wrap">
-              <Field label="Book"><select value={issueForm.bookId} onChange={setI("bookId")} className="focus-ring" style={{ ...inputStyle, width: 200 }}><option value="">Select a book…</option>{libraryBooks.filter((b) => b.availableCopies > 0).map((b) => <option key={b.id} value={b.id}>{b.title} ({b.availableCopies} left)</option>)}</select></Field>
-              <Field label="Borrower name"><input value={issueForm.borrowerName} onChange={setI("borrowerName")} className="focus-ring" style={{ ...inputStyle, width: 180 }} /></Field>
-              <Field label="Class (optional)"><input value={issueForm.borrowerClass} onChange={setI("borrowerClass")} className="focus-ring" style={{ ...inputStyle, width: 120 }} /></Field>
+              <Field label="Issued date"><input type="date" value={issueForm.issuedDate} onChange={setI("issuedDate")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
               <Field label="Due date"><input type="date" value={issueForm.dueDate} onChange={setI("dueDate")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+              <Field label="Reminder date"><input type="date" value={issueForm.reminderDate} onChange={setI("reminderDate")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
               <button type="submit" disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Issue Book"}</button>
             </div>
           </form>
 
           <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 0.8fr 0.9fr 0.9fr 0.9fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-              <span>Book</span><span>Borrower</span><span>Class</span><span>Issued</span><span>Due</span><span>Status</span><span></span>
+            <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 1fr 0.8fr 0.9fr 0.9fr 1fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+              <span>Book</span><span>Type</span><span>Borrower</span><span>Class</span><span>Issued</span><span>Due</span><span>Status</span><span></span>
             </div>
-            {bookIssues.map((i) => (
-              <div key={i.id} style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr 0.8fr 0.9fr 0.9fr 0.9fr 0.6fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
-                <span style={{ fontWeight: 600 }}>{bookTitle(i.bookId)}</span>
-                <span>{i.borrowerName}</span>
-                <span style={{ color: "#6b6656" }}>{i.borrowerClass || "—"}</span>
-                <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{i.issuedDate}</span>
-                <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{i.dueDate || "—"}</span>
-                <span style={{ fontWeight: 700, color: i.status === "Returned" ? "#4a7c59" : "#a1442c" }}>{i.status}</span>
-                {i.status !== "Returned" ? (
-                  <button onClick={() => returnBook(i.id)} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: PANEL, fontSize: 11.5, fontWeight: 600, cursor: "pointer", justifySelf: "end" }}>Mark Returned</button>
-                ) : <span />}
-              </div>
-            ))}
+            {bookIssues.map((i) => {
+              const overdue = i.status !== "Returned" && i.dueDate && i.dueDate < todayStr;
+              const reminderDue = i.status !== "Returned" && i.reminderDate && i.reminderDate <= todayStr;
+              return (
+                <div key={i.id} style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 1fr 0.8fr 0.9fr 0.9fr 1fr 0.6fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+                  <span style={{ fontWeight: 600 }}>{bookTitle(i.bookId)}</span>
+                  <span style={{ fontSize: 11, color: "#6b6656" }}>{i.borrowerType || "Student"}</span>
+                  <span>{i.borrowerName}</span>
+                  <span style={{ color: "#6b6656" }}>{i.borrowerClass || "—"}</span>
+                  <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{i.issuedDate}</span>
+                  <span style={{ fontFamily: MONO_FONT, fontSize: 12, color: overdue ? "#a1442c" : INK, fontWeight: overdue ? 700 : 400 }}>{i.dueDate || "—"}</span>
+                  <span>
+                    <span style={{ fontWeight: 700, color: i.status === "Returned" ? "#4a7c59" : "#a1442c" }}>{i.status}</span>
+                    {overdue && <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, color: "#a1442c", background: "#FBECEC", borderRadius: 999, padding: "2px 6px" }}>OVERDUE</span>}
+                    {!overdue && reminderDue && <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, color: "#A1702C", background: "#FFF3DC", borderRadius: 999, padding: "2px 6px" }}>REMINDER</span>}
+                  </span>
+                  {i.status !== "Returned" ? (
+                    <button onClick={() => returnBook(i.id)} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: PANEL, fontSize: 11.5, fontWeight: 600, cursor: "pointer", justifySelf: "end" }}>Mark Returned</button>
+                  ) : <span />}
+                </div>
+              );
+            })}
             {outstanding.length === 0 && bookIssues.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No books issued yet.</div>}
           </div>
         </>
