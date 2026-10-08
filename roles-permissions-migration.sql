@@ -196,3 +196,36 @@ CREATE POLICY "account_loans_admin_only" ON account_loans
   FOR ALL
   USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
   WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
+
+-- Front Office: follow-up tracking on visitors, plus a separate
+-- appointments book (who, when, purpose).
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up text;
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up_date date;
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS reminder_date date;
+
+CREATE TABLE IF NOT EXISTS appointments (
+  id uuid primary key default gen_random_uuid(),
+  with_whom text not null,
+  purpose text,
+  appointment_date date not null default current_date,
+  appointment_time time,
+  notes text,
+  recorded_by uuid references public.staff_profiles(id),
+  created_at timestamptz not null default now()
+);
+ALTER TABLE appointments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "front_office_full_access_appointments" ON appointments
+  FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Receptionist'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Receptionist'])));
+
+-- Library: book cover photo, a due-date reminder separate from the due date
+-- itself, and linking a loan to an actual student or staff record (or just
+-- a class name, for a whole-class loan) instead of free-text only.
+ALTER TABLE library_books ADD COLUMN IF NOT EXISTS cover_url text;
+
+ALTER TABLE book_issues
+  ADD COLUMN IF NOT EXISTS borrower_type text NOT NULL DEFAULT 'Student',
+  ADD COLUMN IF NOT EXISTS student_id integer REFERENCES public.students(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS reminder_date date;
