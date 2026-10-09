@@ -6396,9 +6396,16 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
   const [saving, setSaving] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [analysing, setAnalysing] = useState(false);
+  // Comparison with a previous exam, so the Mark List can show each pupil's
+  // deviation in total % from that earlier sitting.
+  const [compareExam, setCompareExam] = useState(null); // null = not decided yet, "" = skip, else an exam name
+  const [comparePrompt, setComparePrompt] = useState(false);
+  const [pendingCompare, setPendingCompare] = useState("");
+  const [deviations, setDeviations] = useState(null); // studentId -> previousTotal
 
   const roster = students.filter((s) => s.class === cls);
   const ready = cls && subject && term && year && examName;
+  const previousExams = exams.slice(0, exams.indexOf(examName)).filter(Boolean);
 
   const load = async () => {
     if (!ready) return;
@@ -6437,11 +6444,35 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
     }
   };
 
-  const analyse = async () => {
+  // Clicking Analyse first checks whether there's a previous exam to compare
+  // against — if so and nothing's been decided yet, it shows the picker
+  // instead of analysing immediately.
+  const clickAnalyse = () => {
+    if (previousExams.length > 0 && compareExam === null) { setComparePrompt(true); return; }
+    runAnalysis();
+  };
+
+  const chooseCompareExam = (value) => {
+    setCompareExam(value);
+    setComparePrompt(false);
+    runAnalysis(value);
+  };
+
+  const runAnalysis = async (compareWith = compareExam) => {
     setAnalysing(true);
     try {
       const markRows = await fetchClassMarksForExam({ studentClass: cls, term, year, examName });
       setAnalysis(computeAnalysis(markRows, roster));
+
+      if (compareWith) {
+        const prevRows = await fetchClassMarksForExam({ studentClass: cls, term, year, examName: compareWith });
+        const prevAnalysis = computeAnalysis(prevRows, roster);
+        const map = {};
+        prevAnalysis.perStudent.forEach((r) => { map[r.student.id] = r.total; });
+        setDeviations(map);
+      } else {
+        setDeviations(null);
+      }
     } catch (err) {
       showToast(err.message || "Couldn't analyse");
     } finally {
@@ -6453,13 +6484,13 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
     <div>
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20, marginBottom: 16 }}>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Class">{lockedClass ? <div style={{ ...inputStyle, background: "#EFE9D8", fontWeight: 600 }}>{lockedClass}</div> : <select value={cls} onChange={(e) => { setCls(e.target.value); setLoaded(false); }} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}</select>}</Field>
+          <Field label="Class">{lockedClass ? <div style={{ ...inputStyle, background: "#EFE9D8", fontWeight: 600 }}>{lockedClass}</div> : <select value={cls} onChange={(e) => { setCls(e.target.value); setLoaded(false); setCompareExam(null); setDeviations(null); setPendingCompare(""); }} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}</select>}</Field>
           <Field label="Subject"><select value={subject} onChange={(e) => { setSubject(e.target.value); setLoaded(false); }} className="focus-ring" style={inputStyle}>{subjects.map((s) => <option key={s}>{s}</option>)}</select></Field>
-          <Field label="Term"><select value={term} onChange={(e) => { setTerm(e.target.value); setLoaded(false); }} className="focus-ring" style={inputStyle}>{TERMS.map((t) => <option key={t}>{t}</option>)}</select></Field>
-          <Field label="Year"><select value={year} onChange={(e) => { setYear(e.target.value); setLoaded(false); }} className="focus-ring" style={inputStyle}>{EXAM_YEARS.map((y) => <option key={y}>{y}</option>)}</select></Field>
+          <Field label="Term"><select value={term} onChange={(e) => { setTerm(e.target.value); setLoaded(false); setCompareExam(null); setDeviations(null); setPendingCompare(""); }} className="focus-ring" style={inputStyle}>{TERMS.map((t) => <option key={t}>{t}</option>)}</select></Field>
+          <Field label="Year"><select value={year} onChange={(e) => { setYear(e.target.value); setLoaded(false); setCompareExam(null); setDeviations(null); setPendingCompare(""); }} className="focus-ring" style={inputStyle}>{EXAM_YEARS.map((y) => <option key={y}>{y}</option>)}</select></Field>
           <Field label="Exam name">
             {exams.length === 0 ? <p style={{ fontSize: 12, color: "#a1442c" }}>Unlock an exam first, in Set Up.</p> : (
-              <select value={examName} onChange={(e) => { setExamName(e.target.value); setLoaded(false); }} className="focus-ring" style={inputStyle}>{exams.map((e) => <option key={e}>{e}</option>)}</select>
+              <select value={examName} onChange={(e) => { setExamName(e.target.value); setLoaded(false); setCompareExam(null); setDeviations(null); setPendingCompare(""); }} className="focus-ring" style={inputStyle}>{exams.map((e) => <option key={e}>{e}</option>)}</select>
             )}
           </Field>
           <Field label="Marks out of"><input type="number" min={1} value={outOf} onChange={(e) => setOutOf(e.target.value)} className="focus-ring" style={{ ...inputStyle, fontFamily: MONO_FONT }} /></Field>
@@ -6493,14 +6524,36 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
       )}
 
       {loaded && (
-        <div className="flex gap-2 mb-6">
-          <button onClick={saveAll} disabled={saving} className="focus-ring" style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Save Marks"}</button>
-          <button onClick={analyse} disabled={analysing} className="focus-ring" style={{ padding: "9px 18px", borderRadius: 8, border: `1px solid ${LINE}`, background: PANEL, color: INK, fontWeight: 700, fontSize: 13, cursor: analysing ? "wait" : "pointer" }}>{analysing ? "Analysing…" : "Analyse"}</button>
+        <div className="mb-6">
+          <div className="flex gap-2">
+            <button onClick={saveAll} disabled={saving} className="focus-ring" style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Save Marks"}</button>
+            <button onClick={clickAnalyse} disabled={analysing} className="focus-ring" style={{ padding: "9px 18px", borderRadius: 8, border: `1px solid ${LINE}`, background: PANEL, color: INK, fontWeight: 700, fontSize: 13, cursor: analysing ? "wait" : "pointer" }}>{analysing ? "Analysing…" : "Analyse"}</button>
+          </div>
+
+          {comparePrompt && (
+            <div style={{ marginTop: 12, padding: 14, borderRadius: 10, background: "#EEF5FF", border: "1px solid #CFE0F5" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#245B91", marginBottom: 8 }}>Pick exam to compare with</div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <select value={pendingCompare} onChange={(e) => setPendingCompare(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
+                  <option value="">No comparison</option>
+                  {previousExams.map((e) => <option key={e} value={e}>{e}</option>)}
+                </select>
+                <button
+                  onClick={() => chooseCompareExam(pendingCompare)}
+                  className="focus-ring" style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: "#245B91", color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+                >Continue to Analyse</button>
+              </div>
+            </div>
+          )}
+          {!comparePrompt && compareExam && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "#6b6656" }}>Comparing against <b>{compareExam}</b> — <button onClick={() => { setCompareExam(null); setComparePrompt(true); }} className="focus-ring" style={{ background: "none", border: "none", color: "#245B91", fontWeight: 700, cursor: "pointer", padding: 0 }}>change</button></div>
+          )}
         </div>
       )}
 
       {analysis && (
         <MarkListAnalysis
+          deviations={deviations} compareExam={compareExam}
           analysis={analysis} cls={cls} term={term} year={year} examName={examName}
           schoolSettings={schoolSettings} staff={staff}
           system={classGradingAssignment[cls] || GRADING_SYSTEMS[0]} gradingLevels={gradingLevels}
@@ -6510,11 +6563,12 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
   );
 }
 
-function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings, staff, system, gradingLevels }) {
+function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings, staff, system, gradingLevels, deviations, compareExam }) {
   const [showList, setShowList] = useState(false);
   const classTeacher = staff.find((s) => s.classTeacherOf === cls);
   const subjects = Object.keys(analysis.subjectMeans);
   const legend = buildSubjectLegend(subjects.map((s) => ({ subject: s })));
+  const devFor = (studentId) => (deviations && deviations[studentId] != null ? Math.round((analysis.perStudent.find((r) => r.student.id === studentId)?.total ?? 0) - deviations[studentId]) : null);
 
   const buildHtml = () => `
     <div class="header" style="justify-content:center;text-align:center;">
@@ -6522,14 +6576,17 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
       <div><div class="school-name" style="font-size:22px;">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
     </div>
     <div class="meta" style="text-align:center;font-weight:700;color:#222;font-size:22px;">Mark List — ${examName} · ${cls} · ${term} · ${year}</div>
+    ${deviations ? `<div style="text-align:center;font-size:11.5px;color:#555;margin-bottom:6px;">Deviation compares against <b>${compareExam}</b></div>` : ""}
     <table>
-      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${subjectAbbr(s)}</th>`).join("")}<th>Total %</th><th>Average %</th>${system ? "<th>Level</th>" : ""}</tr></thead>
+      <thead><tr><th>Pos</th><th>Name</th>${subjects.map((s) => `<th>${subjectAbbr(s)}</th>`).join("")}<th>Total %</th><th>Average %</th>${deviations ? "<th>Deviation</th>" : ""}${system ? "<th>Level</th>" : ""}</tr></thead>
       <tbody>
         ${analysis.perStudent.map((r) => {
           const level = gradeForPercent(r.meanscore, system, gradingLevels);
-          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td><td>${Number(r.meanscore).toFixed(1)}</td>${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
+          const dev = devFor(r.student.id);
+          const devCell = deviations ? `<td style="color:${dev == null ? "#888" : dev > 0 ? "#2f6f4a" : dev < 0 ? "#a1442c" : "#555"};font-weight:700;">${dev == null ? "—" : `${dev > 0 ? "▲" : dev < 0 ? "▼" : "–"} ${Math.abs(dev)}`}</td>` : "";
+          return `<tr><td>${r.position}</td><td>${r.student.name}</td>${subjects.map((s) => `<td>${r.bySubject[s] ? r.bySubject[s].pct : "—"}</td>`).join("")}<td>${Math.round(Number(r.total))}</td><td>${Number(r.meanscore).toFixed(1)}</td>${devCell}${system ? `<td>${level ? level.level : "—"}</td>` : ""}</tr>`;
         }).join("")}
-        <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td><td><b>${Number(analysis.classMeanOfAverages).toFixed(1)}</b></td>${system ? "<td></td>" : ""}</tr>
+        <tr><td></td><td><b>Meanscore</b></td>${subjects.map((s) => `<td><b>${analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>`).join("")}<td><b>${Math.round(Number(analysis.classMean))}</b></td><td><b>${Number(analysis.classMeanOfAverages).toFixed(1)}</b></td>${deviations ? "<td></td>" : ""}${system ? "<td></td>" : ""}</tr>
       </tbody>
     </table>
     <div style="font-size:11px;color:#666;margin-top:6px;">Key: ${legend.map((l) => `${l.abbr} = ${l.full}`).join(" · ")}. All marks and totals are percentages.</div>
@@ -6554,7 +6611,7 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
       </div>
       <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 16, fontWeight: 600, textAlign: "center", marginBottom: 3 }}>Mark List — {cls}, {examName}</h3>
 
-      <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 10, textAlign: "center" }}>Class mean score: <b>{Number(analysis.classMean).toFixed(2)}</b> · {analysis.perStudent.length} students ranked</p>
+      <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 10, textAlign: "center" }}>Class mean score: <b>{Number(analysis.classMean).toFixed(2)}</b> · {analysis.perStudent.length} students ranked{deviations && <> · Deviation vs <b>{compareExam}</b></>}</p>
 
       {showList && (
         <div style={{ overflowX: "auto" }}>
@@ -6566,12 +6623,14 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
                 {subjects.map((s) => <th key={s} style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }} title={s}>{subjectAbbr(s)}</th>)}
                 <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Total %</th>
                 <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Average %</th>
+                {deviations && <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Deviation</th>}
                 {system && <th style={{ padding: "7px 8px", fontSize: 11, fontWeight: 700, color: "#4A4536", textTransform: "uppercase" }}>Level</th>}
               </tr>
             </thead>
             <tbody>
               {analysis.perStudent.map((r) => {
                 const level = gradeForPercent(r.meanscore, system, gradingLevels);
+                const dev = devFor(r.student.id);
                 return (
                   <tr key={r.student.id} style={{ borderBottom: `1px solid ${LINE}` }}>
                     <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.position}</td>
@@ -6579,6 +6638,16 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
                     {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{r.bySubject[s] ? Math.round(Number(r.bySubject[s].pct)) : "—"}</td>)}
                     <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Math.round(Number(r.total))}</td>
                     <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700 }}>{Number(r.meanscore).toFixed(1)}</td>
+                    {deviations && (
+                      <td style={{ padding: "6px 8px", fontFamily: MONO_FONT, fontWeight: 700, color: dev == null ? "#a39c86" : dev > 0 ? "#2f6f4a" : dev < 0 ? "#a1442c" : "#6b6656" }}>
+                        {dev == null ? "—" : (
+                          <span className="flex items-center gap-1">
+                            {dev > 0 ? <TrendingUp size={13} /> : dev < 0 ? <TrendingDown size={13} /> : null}
+                            {Math.abs(dev)}
+                          </span>
+                        )}
+                      </td>
+                    )}
                     {system && <td style={{ padding: "6px 8px" }}>{level ? <LevelBadge band={level.band}>{level.level}</LevelBadge> : "—"}</td>}
                   </tr>
                 );
@@ -6588,6 +6657,7 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
                 {subjects.map((s) => <td key={s} style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{analysis.subjectMeans[s] == null ? "—" : Number(analysis.subjectMeans[s]).toFixed(2)}</b></td>)}
                 <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMean).toFixed(2)}</b></td>
                 <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}><b>{Number(analysis.classMeanOfAverages).toFixed(1)}</b></td>
+                {deviations && <td></td>}
                 {system && <td></td>}
               </tr>
             </tbody>
