@@ -233,3 +233,67 @@ ALTER TABLE book_issues
 -- A class or staff member can borrow several copies of the same book in one
 -- loan (e.g. a class set), tracked as a single issue with a quantity.
 ALTER TABLE book_issues ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 1;
+
+-- Fix: clock_arrival()/clock_departure() compared now()::time (server/UTC
+-- time) against the school's local arrival/departure cutoffs, so staff were
+-- almost never actually flagged late/early, which hid the late-reason field
+-- and silently skipped the warning SMS. Now compares Nairobi local time.
+CREATE OR REPLACE FUNCTION public.clock_arrival()
+ RETURNS staff_attendance
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  v_cutoff time;
+  v_late boolean;
+  v_row staff_attendance;
+  v_name text;
+begin
+  select coalesce(arrival_cutoff, '07:20:00') into v_cutoff from school_settings where id = 1;
+  v_late := ((now() at time zone 'Africa/Nairobi')::time > v_cutoff);
+  select name into v_name from staff_profiles where id = auth.uid();
+  if v_name is null then
+    raise exception 'No staff profile found for this account.';
+  end if;
+
+  insert into staff_attendance (staff_id, date, arrival_time, late_arrival)
+  values (auth.uid(), current_date, now(), v_late)
+  on conflict (staff_id, date) do update set arrival_time = excluded.arrival_time, late_arrival = excluded.late_arrival
+  returning * into v_row;
+
+  return v_row;
+end;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.clock_departure()
+ RETURNS staff_attendance
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  v_cutoff time;
+  v_early boolean;
+  v_row staff_attendance;
+  v_name text;
+begin
+  select coalesce(departure_cutoff, '17:00:00') into v_cutoff from school_settings where id = 1;
+  v_early := ((now() at time zone 'Africa/Nairobi')::time < v_cutoff);
+  select name into v_name from staff_profiles where id = auth.uid();
+  if v_name is null then
+    raise exception 'No staff profile found for this account.';
+  end if;
+
+  update staff_attendance
+  set departure_time = now(), early_departure = v_early
+  where staff_id = auth.uid() and date = current_date
+  returning * into v_row;
+
+  if v_row.id is null then
+    raise exception 'No arrival recorded for today yet — mark arrival first.';
+  end if;
+
+  return v_row;
+end;
+$function$;
