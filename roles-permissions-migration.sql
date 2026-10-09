@@ -229,3 +229,7 @@ ALTER TABLE book_issues
   ADD COLUMN IF NOT EXISTS student_id integer REFERENCES public.students(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS staff_id uuid REFERENCES public.staff_profiles(id) ON DELETE SET NULL,
   ADD COLUMN IF NOT EXISTS reminder_date date;
+
+-- A class or staff member can borrow several copies of the same book in one
+-- loan (e.g. a class set), tracked as a single issue with a quantity.
+ALTER TABLE book_issues ADD COLUMN IF NOT EXISTS quantity integer NOT NULL DEFAULT 1;
