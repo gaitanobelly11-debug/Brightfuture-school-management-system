@@ -459,7 +459,7 @@ async function updateLibraryBookCopiesRow(token, id, availableCopies) {
 function mapBookIssueRow(r) {
   return {
     id: r.id, bookId: r.book_id, borrowerType: r.borrower_type || "Student", borrowerName: r.borrower_name, borrowerClass: r.borrower_class || "",
-    studentId: r.student_id ?? null, staffId: r.staff_id || null,
+    studentId: r.student_id ?? null, staffId: r.staff_id || null, quantity: r.quantity || 1,
     issuedDate: r.issued_date, dueDate: r.due_date, reminderDate: r.reminder_date || "", returnedDate: r.returned_date, status: r.status, issuedBy: r.issued_by,
   };
 }
@@ -472,7 +472,7 @@ async function issueBookRow(token, issue, issuedBy) {
     method: "POST",
     body: {
       book_id: issue.bookId, borrower_type: issue.borrowerType || "Student", borrower_name: issue.borrowerName, borrower_class: issue.borrowerClass || null,
-      student_id: issue.studentId || null, staff_id: issue.staffId || null,
+      student_id: issue.studentId || null, staff_id: issue.staffId || null, quantity: issue.quantity || 1,
       issued_date: issue.issuedDate, due_date: issue.dueDate || null, reminder_date: issue.reminderDate || null, status: "Issued", issued_by: issuedBy,
     },
   });
@@ -1587,11 +1587,12 @@ export default function App() {
   };
   const issueBook = async (issue) => {
     const book = libraryBooks.find((b) => b.id === issue.bookId);
-    if (!book || book.availableCopies < 1) throw new Error("No available copies to issue.");
-    const row = await issueBookRow(authedUser.accessToken, issue, authedUser.id);
-    await updateLibraryBookCopiesRow(authedUser.accessToken, book.id, book.availableCopies - 1);
+    const qty = Math.max(1, Number(issue.quantity) || 1);
+    if (!book || book.availableCopies < qty) throw new Error(`Only ${book?.availableCopies ?? 0} ${book?.availableCopies === 1 ? "copy is" : "copies are"} available.`);
+    const row = await issueBookRow(authedUser.accessToken, { ...issue, quantity: qty }, authedUser.id);
+    await updateLibraryBookCopiesRow(authedUser.accessToken, book.id, book.availableCopies - qty);
     setBookIssues((prev) => [row, ...prev]);
-    setLibraryBooks((prev) => prev.map((b) => (b.id === book.id ? { ...b, availableCopies: b.availableCopies - 1 } : b)));
+    setLibraryBooks((prev) => prev.map((b) => (b.id === book.id ? { ...b, availableCopies: b.availableCopies - qty } : b)));
   };
   const returnBook = async (issueId) => {
     const issue = bookIssues.find((i) => i.id === issueId);
@@ -1600,8 +1601,9 @@ export default function App() {
     await returnBookRow(authedUser.accessToken, issueId, returnedDate);
     const book = libraryBooks.find((b) => b.id === issue.bookId);
     if (book) {
-      await updateLibraryBookCopiesRow(authedUser.accessToken, book.id, Math.min(book.totalCopies, book.availableCopies + 1));
-      setLibraryBooks((prev) => prev.map((b) => (b.id === book.id ? { ...b, availableCopies: Math.min(b.totalCopies, b.availableCopies + 1) } : b)));
+      const restored = Math.min(book.totalCopies, book.availableCopies + (issue.quantity || 1));
+      await updateLibraryBookCopiesRow(authedUser.accessToken, book.id, restored);
+      setLibraryBooks((prev) => prev.map((b) => (b.id === book.id ? { ...b, availableCopies: restored } : b)));
     }
     setBookIssues((prev) => prev.map((i) => (i.id === issueId ? { ...i, status: "Returned", returnedDate } : i)));
   };
@@ -7081,7 +7083,7 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
   const [coverFile, setCoverFile] = useState(null);
   const [coverPreview, setCoverPreview] = useState("");
   const [issueForm, setIssueForm] = useState({
-    bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "",
+    bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "", quantity: 1,
     issuedDate: new Date().toISOString().slice(0, 10), dueDate: "", reminderDate: "",
   });
   const [saving, setSaving] = useState(false);
@@ -7137,7 +7139,7 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
       await issueBook(issueForm);
       const book = libraryBooks.find((b) => b.id === issueForm.bookId);
       showToast(`Issued "${book?.title}" to ${issueForm.borrowerName}`);
-      setIssueForm({ bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "", issuedDate: new Date().toISOString().slice(0, 10), dueDate: "", reminderDate: "" });
+      setIssueForm({ bookId: "", borrowerType: "Student", studentId: "", staffId: "", borrowerName: "", borrowerClass: "", quantity: 1, issuedDate: new Date().toISOString().slice(0, 10), dueDate: "", reminderDate: "" });
     } catch (err) {
       showToast(err.message || "Couldn't issue book");
     } finally {
@@ -7148,6 +7150,7 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
   const bookTitle = (id) => libraryBooks.find((b) => b.id === id)?.title || "—";
   const outstanding = bookIssues.filter((i) => i.status !== "Returned");
   const todayStr = new Date().toISOString().slice(0, 10);
+  const selectedBook = libraryBooks.find((b) => b.id === issueForm.bookId);
 
   return (
     <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
@@ -7204,6 +7207,9 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
             <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Issue a book</h3>
             <div className="flex items-end gap-3 flex-wrap mb-3">
               <Field label="Book"><select value={issueForm.bookId} onChange={setI("bookId")} className="focus-ring" style={{ ...inputStyle, width: 220 }}><option value="">Select a book…</option>{libraryBooks.filter((b) => b.availableCopies > 0).map((b) => <option key={b.id} value={b.id}>{b.title} ({b.availableCopies} left)</option>)}</select></Field>
+              <Field label={`Quantity${selectedBook ? ` (${selectedBook.availableCopies} available)` : ""}`}>
+                <input type="number" min={1} max={selectedBook?.availableCopies || undefined} value={issueForm.quantity} onChange={setI("quantity")} className="focus-ring" style={{ ...inputStyle, width: 90 }} />
+              </Field>
               <Field label="Borrower is a">
                 <div className="flex gap-1.5">
                   {["Student", "Staff", "Class"].map((t) => (
@@ -7245,16 +7251,17 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
           </form>
 
           <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 1fr 0.8fr 0.9fr 0.9fr 1fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-              <span>Book</span><span>Type</span><span>Borrower</span><span>Class</span><span>Issued</span><span>Due</span><span>Status</span><span></span>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.5fr 0.4fr 0.9fr 0.7fr 0.8fr 0.9fr 1fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+              <span>Book</span><span>Type</span><span>Qty</span><span>Borrower</span><span>Class</span><span>Issued</span><span>Due</span><span>Status</span><span></span>
             </div>
             {bookIssues.map((i) => {
               const overdue = i.status !== "Returned" && i.dueDate && i.dueDate < todayStr;
               const reminderDue = i.status !== "Returned" && i.reminderDate && i.reminderDate <= todayStr;
               return (
-                <div key={i.id} style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 1fr 0.8fr 0.9fr 0.9fr 1fr 0.6fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+                <div key={i.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 0.5fr 0.4fr 0.9fr 0.7fr 0.8fr 0.9fr 1fr 0.6fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
                   <span style={{ fontWeight: 600 }}>{bookTitle(i.bookId)}</span>
                   <span style={{ fontSize: 11, color: "#6b6656" }}>{i.borrowerType || "Student"}</span>
+                  <span style={{ fontFamily: MONO_FONT, fontWeight: 700 }}>{i.quantity || 1}</span>
                   <span>{i.borrowerName}</span>
                   <span style={{ color: "#6b6656" }}>{i.borrowerClass || "—"}</span>
                   <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{i.issuedDate}</span>
