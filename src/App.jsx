@@ -410,6 +410,9 @@ async function updateVisitorFollowUp(token, id, followUp) {
   });
   return mapVisitorRow(row);
 }
+async function deleteVisitorRow(token, id) {
+  await pgFetch(`visitors?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
+}
 
 /* ---------------------------------------------------------------------- *
  *  FRONT OFFICE — Appointments book (who it's with, when, and why).
@@ -784,6 +787,11 @@ async function fetchOwnTodayAttendance(token, staffId) {
 
 async function fetchAttendanceForDate(token, date) {
   const rows = await pgFetch(`staff_attendance?date=eq.${date}&select=*`, token);
+  return rows.map(mapAttendanceRow);
+}
+
+async function fetchAttendanceForRange(token, fromDate, toDate) {
+  const rows = await pgFetch(`staff_attendance?date=gte.${fromDate}&date=lte.${toDate}&select=*&order=date`, token);
   return rows.map(mapAttendanceRow);
 }
 
@@ -1565,6 +1573,10 @@ export default function App() {
     const row = await updateVisitorFollowUp(authedUser.accessToken, id, followUp);
     setVisitors((prev) => prev.map((v) => (v.id === id ? row : v)));
   };
+  const deleteVisitor = async (id) => {
+    await deleteVisitorRow(authedUser.accessToken, id);
+    setVisitors((prev) => prev.filter((v) => v.id !== id));
+  };
 
   // Front Office — appointments book
   const addAppointment = async (appt) => {
@@ -1746,6 +1758,7 @@ export default function App() {
   };
 
   const fetchStaffAttendanceForDate = (date) => fetchAttendanceForDate(authedUser.accessToken, date);
+  const fetchStaffAttendanceForRange = (from, to) => fetchAttendanceForRange(authedUser.accessToken, from, to);
   const saveAttendanceReason = async (id, field, reason) => {
     await patchAttendanceReason(authedUser.accessToken, id, field, reason);
   };
@@ -1768,14 +1781,14 @@ export default function App() {
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
     generateLessonPlan,
-    visitors, addVisitor, setVisitorFollowUp,
+    visitors, addVisitor, setVisitorFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
     libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook,
     addStudent, deleteStudent, updateStudent, promoteClassStudents, addStaff, markAttendance, setGrade, saveGrade, recordPayment, recordPaymentBatch, showToast,
     addClass, removeClass, addSubject, removeSubject, updateSchoolSettings, setClassFee,
     addExam, deleteExam, addEvent, deleteEvent, deletePayment, saveGradingLevel, setClassGrading, sendNotification, readNotification, deleteNotification,
     createTeacherLogin, updateTeacherLogin, deleteStaffMember, updateStaffDetails,
-    clockArrival, clockDeparture, fetchStaffAttendanceForDate, saveAttendanceReason,
+    clockArrival, clockDeparture, fetchStaffAttendanceForDate, fetchStaffAttendanceForRange, saveAttendanceReason,
     uploadPhoto: (file, folder) => uploadPhoto(authedUser.accessToken, file, folder),
     fetchMarksFor: (args) => fetchMarksFor(authedUser.accessToken, args),
     saveMarkRow: (row) => saveMarkRow(authedUser.accessToken, row),
@@ -3291,7 +3304,7 @@ function Field({ label, children }) {
 /* ---------------------------------------------------------------------- *
  *  ATTENDANCE
  * ---------------------------------------------------------------------- */
-function AttendanceView({ students, attendance, markAttendance, showToast, schoolDays, classes, authedUser, isAdmin, staff, fetchStaffAttendanceForDate, saveAttendanceReason, sendNotification, schoolSettings, attendanceLanding }) {
+function AttendanceView({ students, attendance, markAttendance, showToast, schoolDays, classes, authedUser, isAdmin, staff, fetchStaffAttendanceForDate, fetchStaffAttendanceForRange, saveAttendanceReason, sendNotification, schoolSettings, attendanceLanding }) {
   // A Class Teacher only ever sees/marks their own class; the picker is
   // locked to it instead of hidden, so it's clear which class this is.
   const lockedClass = !isAdmin ? authedUser.classTeacherOf : null;
@@ -3332,7 +3345,7 @@ function AttendanceView({ students, attendance, markAttendance, showToast, schoo
       )}
 
       {subTab === "staff" && isAdmin ? (
-        <StaffAttendanceTab staff={staff} fetchStaffAttendanceForDate={fetchStaffAttendanceForDate} saveAttendanceReason={saveAttendanceReason} sendNotification={sendNotification} showToast={showToast} arrivalCutoff={schoolSettings?.arrivalCutoff} departureCutoff={schoolSettings?.departureCutoff} />
+        <StaffAttendanceTab staff={staff} fetchStaffAttendanceForDate={fetchStaffAttendanceForDate} fetchStaffAttendanceForRange={fetchStaffAttendanceForRange} saveAttendanceReason={saveAttendanceReason} sendNotification={sendNotification} showToast={showToast} arrivalCutoff={schoolSettings?.arrivalCutoff} departureCutoff={schoolSettings?.departureCutoff} schoolSettings={schoolSettings} />
       ) : (
       <>
       <div className="flex items-center gap-3 mb-4">
@@ -3346,7 +3359,10 @@ function AttendanceView({ students, attendance, markAttendance, showToast, schoo
         <select value={date} onChange={(e) => setDate(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 160, fontFamily: MONO_FONT }}>
           {schoolDays.map((d) => <option key={d} value={d}>{d}</option>)}
         </select>
-        <span style={{ marginLeft: "auto", fontSize: 13, fontWeight: 600, color: rate < 85 ? "#a1442c" : "#2f6f4a" }}>{present}/{roster.length} present · {rate}%</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: rate < 85 ? "#a1442c" : "#2f6f4a" }}>{present}/{roster.length} present · {rate}%</span>
+        <AttendancePrintPanel onGenerate={async (from, to) => {
+          printDocument(`${cls} Attendance Summary`, buildStudentAttendanceSummaryHtml({ schoolSettings, cls, fromDate: from, toDate: to, roster, attendance }));
+        }} />
       </div>
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
@@ -5691,6 +5707,100 @@ function buildReceiptHtml({ schoolSettings, student, payments, date, method, rec
   `;
 }
 
+// Printable attendance summary for a class over a date range — days
+// present/late/absent per pupil, and an overall attendance rate.
+function buildStudentAttendanceSummaryHtml({ schoolSettings, cls, fromDate, toDate, roster, attendance }) {
+  const rows = roster.map((s) => {
+    const recs = attendance.filter((a) => a.studentId === s.id && a.date >= fromDate && a.date <= toDate);
+    const present = recs.filter((a) => a.status === "Present").length;
+    const late = recs.filter((a) => a.status === "Late").length;
+    const absent = recs.filter((a) => a.status === "Absent").length;
+    const total = recs.length;
+    const rate = total ? Math.round(((present + late) / total) * 100) : 0;
+    return { name: s.name, present, late, absent, total, rate };
+  });
+  const classRate = rows.length ? Math.round(rows.reduce((s, r) => s + r.rate, 0) / rows.length) : 0;
+  return `
+    <div class="header" style="justify-content:center;text-align:center;">
+      ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
+      <div><div class="school-name" style="font-size:20px;">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
+    </div>
+    <div class="meta" style="text-align:center;font-weight:700;color:#222;font-size:16px;">Student Attendance Summary — ${cls}</div>
+    <div class="meta" style="text-align:center;margin-top:-10px;">${fromDate} to ${toDate}</div>
+    <table>
+      <thead><tr><th>Name</th><th>Present</th><th>Late</th><th>Absent</th><th>Days Recorded</th><th>Attendance Rate</th></tr></thead>
+      <tbody>
+        ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.present}</td><td>${r.late}</td><td>${r.absent}</td><td>${r.total}</td><td>${r.rate}%</td></tr>`).join("")}
+      </tbody>
+    </table>
+    <div class="summary">Class average attendance rate: <b style="display:inline">${classRate}%</b></div>
+  `;
+}
+
+// Printable attendance summary for all staff over a date range — days
+// recorded, how many were late arrivals / early departures, and how many
+// were fully on time.
+function buildStaffAttendanceSummaryHtml({ schoolSettings, fromDate, toDate, staff, records }) {
+  const rows = staff.map((s) => {
+    const recs = records.filter((r) => r.staffId === s.id);
+    const daysRecorded = recs.length;
+    const lateCount = recs.filter((r) => r.lateArrival).length;
+    const earlyCount = recs.filter((r) => r.earlyDeparture).length;
+    const onTime = daysRecorded - lateCount;
+    return { name: s.name, role: s.role, daysRecorded, lateCount, earlyCount, onTime };
+  });
+  return `
+    <div class="header" style="justify-content:center;text-align:center;">
+      ${schoolSettings?.logoUrl ? `<img src="${schoolSettings.logoUrl}" />` : ""}
+      <div><div class="school-name" style="font-size:20px;">${schoolSettings?.name || "Brightfuture Primary School"}</div></div>
+    </div>
+    <div class="meta" style="text-align:center;font-weight:700;color:#222;font-size:16px;">Staff Attendance Summary</div>
+    <div class="meta" style="text-align:center;margin-top:-10px;">${fromDate} to ${toDate}</div>
+    <table>
+      <thead><tr><th>Name</th><th>Role</th><th>Days Recorded</th><th>On Time</th><th>Late Arrivals</th><th>Early Departures</th></tr></thead>
+      <tbody>
+        ${rows.map((r) => `<tr><td>${r.name}</td><td>${r.role}</td><td>${r.daysRecorded}</td><td>${r.onTime}</td><td>${r.lateCount}</td><td>${r.earlyCount}</td></tr>`).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+// A small "Print Summary" toggle with a From/To date range, reused for both
+// the student and staff attendance summaries.
+function AttendancePrintPanel({ onGenerate }) {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const monthStart = `${todayStr.slice(0, 7)}-01`;
+  const [open, setOpen] = useState(false);
+  const [from, setFrom] = useState(monthStart);
+  const [to, setTo] = useState(todayStr);
+  const [busy, setBusy] = useState(false);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      await onGenerate(from, to);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ marginLeft: open ? 0 : "auto" }}>
+      {!open && (
+        <button type="button" onClick={() => setOpen(true)} className="focus-ring flex items-center gap-1.5" style={{ marginLeft: "auto", padding: "7px 13px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}><Printer size={13} /> Print Summary</button>
+      )}
+      {open && (
+        <div className="flex items-center gap-2 flex-wrap" style={{ padding: 10, borderRadius: 10, background: "#F7F4EC", border: `1px solid ${LINE}` }}>
+          <Field label="From"><input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 145 }} /></Field>
+          <Field label="To"><input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 145 }} /></Field>
+          <button type="button" disabled={busy} onClick={generate} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12, cursor: busy ? "wait" : "pointer" }}>{busy ? "Generating…" : "Generate"}</button>
+          <button type="button" onClick={() => setOpen(false)} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer" }}>Cancel</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NotificationsView({ notifications, staff, isAdmin, authedUser, sendNotification, readNotification, deleteNotification, showToast }) {
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
@@ -6990,7 +7100,7 @@ function fmtClockTime(iso) {
 /* ---------------------------------------------------------------------- *
  *  FRONT OFFICE — Receptionist logs visitors (name, reason, date, comments)
  * ---------------------------------------------------------------------- */
-function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, appointments, addAppointment, deleteAppointment, showToast }) {
+function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, deleteVisitor, appointments, addAppointment, deleteAppointment, showToast }) {
   const [form, setForm] = useState({ name: "", reason: "", date: new Date().toISOString().slice(0, 10), comments: "" });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -7048,14 +7158,14 @@ function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, appointment
 
       <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Visitor Log</div>
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 28 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-          <span>Date</span><span>Visitor</span><span>Reason</span><span>Follow-up</span><span></span>
+        <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr 0.4fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Date</span><span>Visitor</span><span>Reason</span><span>Follow-up</span><span></span><span></span>
         </div>
         {visitors.map((v) => {
           const reminderDue = v.reminderDate && v.reminderDate <= todayStr;
           return (
             <div key={v.id} style={{ borderBottom: `1px solid ${LINE}` }}>
-              <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr", padding: "9px 16px", fontSize: 13, alignItems: "center" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr 0.4fr", padding: "9px 16px", fontSize: 13, alignItems: "center" }}>
                 <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{v.date}</span>
                 <span style={{ fontWeight: 600 }}>{v.name}</span>
                 <span>{v.reason}</span>
@@ -7067,6 +7177,7 @@ function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, appointment
                   </span>
                 ) : <span style={{ color: "#c4bda7", fontSize: 12 }}>No follow-up set</span>}
                 <button onClick={() => startFollowUp(v)} className="focus-ring" style={{ justifySelf: "end", padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{v.followUp ? "Edit" : "Add"}</button>
+                <button onClick={() => { if (window.confirm(`Delete the visitor log entry for ${v.name}?`)) deleteVisitor(v.id); }} className="focus-ring" title="Delete entry" style={{ justifySelf: "end", background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
               {editingId === v.id && (
                 <div className="flex items-end gap-3 flex-wrap" style={{ padding: "0 16px 14px" }}>
@@ -7365,7 +7476,7 @@ function HRView(ctx) {
   );
 }
 
-function StaffAttendanceTab({ staff, fetchStaffAttendanceForDate, saveAttendanceReason, sendNotification, showToast, arrivalCutoff, departureCutoff }) {
+function StaffAttendanceTab({ staff, fetchStaffAttendanceForDate, fetchStaffAttendanceForRange, saveAttendanceReason, sendNotification, showToast, arrivalCutoff, departureCutoff, schoolSettings }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -7417,6 +7528,10 @@ function StaffAttendanceTab({ staff, fetchStaffAttendanceForDate, saveAttendance
       <div className="flex items-center gap-3 mb-4">
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 180 }} />
         <span style={{ fontSize: 11.5, color: "#9a9484" }}>Official arrival {arrivalCutoff || "07:20"} · Official departure {departureCutoff || "17:00"}</span>
+        <AttendancePrintPanel onGenerate={async (from, to) => {
+          const records = await fetchStaffAttendanceForRange(from, to);
+          printDocument("Staff Attendance Summary", buildStaffAttendanceSummaryHtml({ schoolSettings, fromDate: from, toDate: to, staff, records }));
+        }} />
       </div>
 
       {loading ? (
