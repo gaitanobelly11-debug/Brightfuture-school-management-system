@@ -966,8 +966,8 @@ const BG_SOFT = "#F6FAFD";
 const APP_GRADIENT = `linear-gradient(180deg, ${BG} 0%, ${BG_SOFT} 100%)`;
 const INK = "#1E2333";
 const PANEL = "#FFFFFF";
-const RAIL = "#3D6D9E";
-const RAIL_SOFT = "#5B87B3";
+const RAIL = "#1877F2";
+const RAIL_SOFT = "#4C9BF8";
 const ACCENT = "#C1502E";
 const LINE = "#D3E2F0";
 const DISPLAY_FONT = "'Fraunces', 'Georgia', serif";
@@ -2217,25 +2217,25 @@ function TopBar({ authedUser, onLogout, schoolSettings, classCount, myAttendance
   }
 
   return (
-    <header style={{ borderBottom: `1px solid ${LINE}`, background: BG, position: "relative", minHeight: 92 }} className="flex items-center justify-between px-7 py-3 shrink-0">
+    <header style={{ borderBottom: `1px solid ${RAIL_SOFT}`, background: RAIL, position: "relative", minHeight: 92 }} className="flex items-center justify-between px-7 py-3 shrink-0">
       <div style={{ position: "absolute", left: "50%", transform: "translateX(-50%)", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", width: "min(62%, 680px)" }}>
         {schoolSettings?.logoUrl && (
-          <img src={schoolSettings.logoUrl} alt="School logo" style={{ width: 46, height: 46, borderRadius: 10, objectFit: "cover", border: `1px solid ${LINE}`, marginBottom: 5 }} />
+          <img src={schoolSettings.logoUrl} alt="School logo" style={{ width: 46, height: 46, borderRadius: 10, objectFit: "cover", border: "1px solid rgba(255,255,255,.4)", marginBottom: 5 }} />
         )}
-        <h1 style={{ fontFamily: DISPLAY_FONT, fontSize: 22, fontWeight: 600, letterSpacing: -0.2, margin: 0 }}>{schoolSettings?.name || "Brightfuture Primary School"}</h1>
-        <p style={{ fontSize: 11.5, color: "#7A7568", margin: "2px 0 0" }}>{[schoolSettings?.address, schoolSettings?.email, schoolSettings?.contact].filter(Boolean).join(" · ")}</p>
-        <p style={{ fontSize: 10.5, color: "#9a9484", margin: "2px 0 0" }}>{schoolSettings?.currentTerm || DEFAULT_TERM} · {classCount} classes · School Management System</p>
+        <h1 style={{ fontFamily: DISPLAY_FONT, fontSize: 22, fontWeight: 600, letterSpacing: -0.2, margin: 0, color: "#fff" }}>{schoolSettings?.name || "Brightfuture Primary School"}</h1>
+        <p style={{ fontSize: 11.5, color: "rgba(255,255,255,.85)", margin: "2px 0 0" }}>{[schoolSettings?.address, schoolSettings?.email, schoolSettings?.contact].filter(Boolean).join(" · ")}</p>
+        <p style={{ fontSize: 10.5, color: "rgba(255,255,255,.65)", margin: "2px 0 0" }}>{schoolSettings?.currentTerm || DEFAULT_TERM} · {classCount} classes · School Management System</p>
       </div>
       <div style={{ marginLeft: "auto" }} className="flex items-center gap-3">
         <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.1 }}>{authedUser.name}</div>
-          <div style={{ fontSize: 10.5, color: "#8a8474" }}>{authedUser.role}</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.1, color: "#fff" }}>{authedUser.name}</div>
+          <div style={{ fontSize: 10.5, color: "rgba(255,255,255,.7)" }}>{authedUser.role}</div>
           {clockBtn}
         </div>
-        <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#EADFC2", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: RAIL }}>
+        <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: RAIL }}>
           {initials(authedUser.name)}
         </div>
-        <button onClick={onLogout} className="focus-ring" title="Sign out" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#8a8474" }}>
+        <button onClick={onLogout} className="focus-ring" title="Sign out" style={{ background: "none", border: "1px solid rgba(255,255,255,.4)", borderRadius: 8, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff" }}>
           <LogOut size={14} />
         </button>
       </div>
