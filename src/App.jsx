@@ -961,13 +961,15 @@ async function saveReportRemarks(token, { studentId, studentClass, term, year, e
 /* ---------------------------------------------------------------------- *
  *  THEME
  * ---------------------------------------------------------------------- */
-const BG = "#F2EFE6";
+const BG = "#E3EEF9";
+const BG_SOFT = "#F6FAFD";
+const APP_GRADIENT = `linear-gradient(180deg, ${BG} 0%, ${BG_SOFT} 100%)`;
 const INK = "#1E2333";
 const PANEL = "#FFFFFF";
-const RAIL = "#152A4A";
-const RAIL_SOFT = "#20395E";
+const RAIL = "#3D6D9E";
+const RAIL_SOFT = "#5B87B3";
 const ACCENT = "#C1502E";
-const LINE = "#E3DED0";
+const LINE = "#D3E2F0";
 const DISPLAY_FONT = "'Fraunces', 'Georgia', serif";
 const BODY_FONT = "'Inter', system-ui, sans-serif";
 const MONO_FONT = "'IBM Plex Mono', 'Courier New', monospace";
@@ -1001,7 +1003,7 @@ const GLOBAL_CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 * { box-sizing: border-box; }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: #d8d2bd; border-radius: 8px; }
+::-webkit-scrollbar-thumb { background: #b9cfe4; border-radius: 8px; }
 button { font-family: inherit; }
 .focus-ring:focus-visible { outline: 2px solid ${ACCENT}; outline-offset: 2px; }
 `;
@@ -1800,7 +1802,7 @@ export default function App() {
 
   if (recoveryToken) {
     return (
-      <div style={{ background: BG, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
+      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
         <style>{GLOBAL_CSS}</style>
         <ResetPasswordScreen
           accessToken={recoveryToken}
@@ -1815,7 +1817,7 @@ export default function App() {
 
   if (!authedUser) {
     return (
-      <div style={{ background: BG, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
+      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
         <style>{GLOBAL_CSS}</style>
         {restoringSession ? (
           <div className="flex items-center justify-center" style={{ minHeight: "100vh", color: "#8a8474", fontSize: 13.5 }}>
@@ -1829,7 +1831,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ background: BG, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
+    <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
       <style>{GLOBAL_CSS}</style>
       <div className="flex min-h-screen">
         <button type="button" aria-label="Open menu" className="sidebar-menu-button focus-ring" onClick={() => setMenuOpen(true)} style={{ width: 42, height: 42, borderRadius: 10, border: `1px solid ${LINE}`, background: PANEL, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>☰</button>
@@ -6793,12 +6795,26 @@ function MarkListAnalysis({ analysis, cls, term, year, examName, schoolSettings,
   );
 }
 
-// Finds who to credit as "Instructor" for a subject in a class: prefers
-// the class teacher (if that subject is in their list), otherwise the
-// first staff member who lists that subject. The app doesn't track a
-// strict per-class-per-subject teacher assignment, so this is a
-// best-effort match rather than a guaranteed-correct lookup.
-function findInstructor(subject, cls, staff) {
+// Finds who to credit as "Instructor" for a subject in a class. The
+// timetable is the authoritative source — it's where a subject in a
+// specific class actually gets assigned to a specific teacher — so that's
+// checked first (using whichever teacher appears most often across that
+// class's periods for the subject, in case of a rare mismatch). Only when
+// no timetable entry exists for that class+subject does this fall back to
+// the looser guess: the class teacher (if they teach that subject) or the
+// first staff member whose profile lists it.
+function findInstructor(subject, cls, staff, timetableEntries) {
+  if (timetableEntries && timetableEntries.length) {
+    const counts = {};
+    timetableEntries
+      .filter((e) => e.class === cls && e.subject === subject && e.teacherId)
+      .forEach((e) => { counts[e.teacherId] = (counts[e.teacherId] || 0) + 1; });
+    const topTeacherId = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+    if (topTeacherId) {
+      const teacher = staff.find((s) => s.id === topTeacherId);
+      if (teacher) return teacher.name;
+    }
+  }
   const classTeacher = staff.find((s) => s.classTeacherOf === cls);
   if (classTeacher && classTeacher.subjects.includes(subject)) return classTeacher.name;
   const subjectTeacher = staff.find((s) => s.subjects.includes(subject));
@@ -6812,7 +6828,7 @@ function maxPointsForSystem(system, gradingLevels) {
 
 const REPORT_TEAL = "#12988A";
 
-function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStudentMarksHistory, fetchReportRemarks, saveReportRemarks, schoolSettings, staff, classGradingAssignment, gradingLevels, authedUser, isAdmin, showToast }) {
+function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStudentMarksHistory, fetchReportRemarks, saveReportRemarks, schoolSettings, staff, classGradingAssignment, gradingLevels, authedUser, isAdmin, showToast, timetableEntries }) {
   const lockedClass = !isAdmin ? authedUser?.classTeacherOf : null;
   const [cls, setCls] = useState(lockedClass || classes[0] || "");
   const [studentId, setStudentId] = useState("");
@@ -6955,7 +6971,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
         <tbody>
           ${summary.subjects.map((subj) => {
             const m = record.bySubject[subj];
-            return `<tr><td>${subj}</td><td>${Math.round(Number(m.score))}/${Math.round(Number(m.outOf))}</td><td>${Math.round(Number(m.pct))} ${m.level}</td><td>${m.rank}/${m.outOfCount}</td><td>${Math.round(Number(m.points))}</td><td>${m.comment || ""}</td><td>${findInstructor(subj, cls, staff)}</td></tr>`;
+            return `<tr><td>${subj}</td><td>${Math.round(Number(m.score))}/${Math.round(Number(m.outOf))}</td><td>${Math.round(Number(m.pct))} ${m.level}</td><td>${m.rank}/${m.outOfCount}</td><td>${Math.round(Number(m.points))}</td><td>${m.comment || ""}</td><td>${findInstructor(subj, cls, staff, timetableEntries)}</td></tr>`;
           }).join("")}
         </tbody>
       </table>
@@ -7072,7 +7088,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.rank}/{m.outOfCount}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO_FONT }}>{m.points}</td>
                       <td style={{ padding: "6px 8px", color: "#6b6656" }}>{m.comment || "—"}</td>
-                      <td style={{ padding: "6px 8px", color: "#6b6656" }}>{findInstructor(subj, cls, staff) || "—"}</td>
+                      <td style={{ padding: "6px 8px", color: "#6b6656" }}>{findInstructor(subj, cls, staff, timetableEntries) || "—"}</td>
                     </tr>
                   );
                 })}
