@@ -980,10 +980,11 @@ const GLOBAL_CSS = `
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }
 .dashboard-overview-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
-.dashboard-info-card { border-radius:14px; padding:16px; border:1px solid rgba(0,0,0,.07); min-height:108px; }
+.dashboard-info-card { border-radius:14px; padding:16px; border:1px solid rgba(0,0,0,.07); min-height:108px; box-shadow:0 -3px 0 rgba(255,255,255,.5) inset, 0 6px 16px rgba(30,52,90,.09); }
 .dashboard-events-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
-.dashboard-event-card { border-radius:14px; padding:15px; border:1px solid rgba(0,0,0,.07); min-height:92px; }
-.dashboard-table-card { border-radius:14px; overflow:hidden; border:1px solid rgba(0,0,0,.07); background:${PANEL}; }
+.dashboard-event-card { border-radius:14px; padding:15px; border:1px solid rgba(0,0,0,.07); min-height:92px; box-shadow:0 -3px 0 rgba(255,255,255,.5) inset, 0 6px 16px rgba(30,52,90,.09); }
+.dashboard-table-card { border-radius:14px; overflow:hidden; border:1px solid rgba(0,0,0,.07); background:${PANEL}; box-shadow:0 6px 16px rgba(30,52,90,.09); }
+.dashboard-section { box-shadow:0 -3px 0 rgba(255,255,255,.5) inset, 0 6px 16px rgba(30,52,90,.09); }
 @media(max-width:900px){ .dashboard-overview-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .dashboard-events-grid{grid-template-columns:1fr;} }
 @media(max-width:520px){ .dashboard-overview-grid{gap:9px;} .dashboard-info-card{padding:12px;min-height:94px;} }
 .sidebar-drawer { transition: transform .22s ease; }
@@ -2171,7 +2172,7 @@ function Sidebar({ view, setView, role, menuOpen }) {
               style={{
                 width: 68, padding: "10px 4px", borderRadius: 12, border: "none",
                 background: active ? RAIL_SOFT : "transparent",
-                color: active ? "#F2B79A" : "#9FB0CB",
+                color: active ? "#fff" : "rgba(255,255,255,.78)",
                 cursor: "pointer", display: "flex", flexDirection: "column",
                 alignItems: "center", gap: 4, transition: "background .15s",
               }}
