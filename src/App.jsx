@@ -1803,30 +1803,36 @@ export default function App() {
 
   if (recoveryToken) {
     return (
-      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
+      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT, display: "flex", flexDirection: "column" }}>
         <style>{GLOBAL_CSS}</style>
-        <ResetPasswordScreen
-          accessToken={recoveryToken}
-          onDone={() => {
-            setRecoveryToken(null);
-            window.history.replaceState(null, "", window.location.pathname);
-          }}
-        />
+        <div style={{ flex: 1 }}>
+          <ResetPasswordScreen
+            accessToken={recoveryToken}
+            onDone={() => {
+              setRecoveryToken(null);
+              window.history.replaceState(null, "", window.location.pathname);
+            }}
+          />
+        </div>
+        <AppFooter />
       </div>
     );
   }
 
   if (!authedUser) {
     return (
-      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT }}>
+      <div style={{ background: APP_GRADIENT, minHeight: "100vh", color: INK, fontFamily: BODY_FONT, display: "flex", flexDirection: "column" }}>
         <style>{GLOBAL_CSS}</style>
-        {restoringSession ? (
-          <div className="flex items-center justify-center" style={{ minHeight: "100vh", color: "#8a8474", fontSize: 13.5 }}>
-            Signing you in…
-          </div>
-        ) : (
-          <LoginScreen onLogin={handleLogin} />
-        )}
+        <div style={{ flex: 1 }}>
+          {restoringSession ? (
+            <div className="flex items-center justify-center" style={{ minHeight: "80vh", color: "#8a8474", fontSize: 13.5 }}>
+              Signing you in…
+            </div>
+          ) : (
+            <LoginScreen onLogin={handleLogin} />
+          )}
+        </div>
+        <AppFooter />
       </div>
     );
   }
@@ -1895,10 +1901,20 @@ export default function App() {
               </>
             )}
           </main>
+          <AppFooter />
         </div>
       </div>
       {toast && <Toast message={toast} />}
     </div>
+  );
+}
+
+// Copyright line shown at the bottom of every page (app screens and login).
+function AppFooter({ light }) {
+  return (
+    <footer style={{ textAlign: "center", padding: "14px 16px", fontSize: 11.5, color: light ? "rgba(255,255,255,.85)" : "#5b6b80", borderTop: light ? "none" : `1px solid ${LINE}`, flexShrink: 0 }}>
+      © gabetech.com. All rights reserved.
+    </footer>
   );
 }
 
@@ -1966,7 +1982,7 @@ function LoginScreen({ onLogin }) {
   };
 
   return (
-    <div className="flex items-center justify-center" style={{ minHeight: "100vh", padding: 20 }}>
+    <div className="flex items-center justify-center" style={{ minHeight: "calc(100vh - 52px)", padding: 20 }}>
       <div style={{ width: 380, maxWidth: "100%" }}>
         <div className="flex flex-col items-center mb-6">
           <div style={{ width: 52, height: 52, borderRadius: 14, background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14 }}>
@@ -2088,7 +2104,7 @@ function ResetPasswordScreen({ accessToken, onDone }) {
   };
 
   return (
-    <div className="flex items-center justify-center" style={{ minHeight: "100vh", padding: 20 }}>
+    <div className="flex items-center justify-center" style={{ minHeight: "calc(100vh - 52px)", padding: 20 }}>
       <div style={{ width: 380, maxWidth: "100%" }}>
         <div className="flex flex-col items-center mb-6">
           <div style={{ width: 52, height: 52, borderRadius: 14, background: ACCENT, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14 }}>
