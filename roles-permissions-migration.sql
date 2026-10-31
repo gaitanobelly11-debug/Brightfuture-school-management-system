@@ -297,3 +297,10 @@ begin
   return v_row;
 end;
 $function$;
+
+-- Front Office: follow-ups can be completed & closed. Library: shelves —
+-- course books are tracked per subject and class.
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up_status text NOT NULL DEFAULT 'Open';
+ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up_completed_date date;
+ALTER TABLE library_books ADD COLUMN IF NOT EXISTS subject text;
+ALTER TABLE library_books ADD COLUMN IF NOT EXISTS class_name text;
