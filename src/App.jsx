@@ -325,6 +325,9 @@ async function fetchPayslips(token) {
  *  actually spent from, so each account's running balance (collected minus
  *  spent) can be shown.
  * ---------------------------------------------------------------------- */
+// Library shelves — the categories a book is filed under. Course books are
+// further tracked per subject and class; the rest are supplementary shelves.
+const BOOK_SHELVES = ["Course Books", "Supplementary Books", "Story Books", "Encyclopedias", "Bibles", "Dictionary", "Amusing", "Atlas"];
 const PAYMENT_ACCOUNTS = ["School Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
 const COMPULSORY_ACCOUNTS = ["School Fees"];
 // What's actually available to spend from an account: money collected,
@@ -385,6 +388,7 @@ function mapVisitorRow(r) {
   return {
     id: r.id, name: r.visitor_name, reason: r.reason, date: r.visit_date, comments: r.comments || "",
     followUp: r.follow_up || "", followUpDate: r.follow_up_date || "", reminderDate: r.reminder_date || "",
+    followUpStatus: r.follow_up_status || "Open", followUpCompletedDate: r.follow_up_completed_date || "",
     recordedBy: r.recorded_by, createdAt: r.created_at,
   };
 }
@@ -406,7 +410,14 @@ async function addVisitorRow(token, visitor, recordedBy) {
 async function updateVisitorFollowUp(token, id, followUp) {
   const [row] = await pgFetch(`visitors?id=eq.${id}`, token, {
     method: "PATCH",
-    body: { follow_up: followUp.followUp || null, follow_up_date: followUp.followUpDate || null, reminder_date: followUp.reminderDate || null },
+    body: { follow_up: followUp.followUp || null, follow_up_date: followUp.followUpDate || null, reminder_date: followUp.reminderDate || null, follow_up_status: "Open", follow_up_completed_date: null },
+  });
+  return mapVisitorRow(row);
+}
+async function completeVisitorFollowUp(token, id) {
+  const [row] = await pgFetch(`visitors?id=eq.${id}`, token, {
+    method: "PATCH",
+    body: { follow_up_status: "Completed", follow_up_completed_date: new Date().toISOString().slice(0, 10) },
   });
   return mapVisitorRow(row);
 }
@@ -440,7 +451,7 @@ async function deleteAppointmentRow(token, id) {
  *  Admin can see it too.
  * ---------------------------------------------------------------------- */
 function mapLibraryBookRow(r) {
-  return { id: r.id, title: r.title, author: r.author || "", isbn: r.isbn || "", category: r.category || "", totalCopies: r.total_copies, availableCopies: r.available_copies, coverUrl: r.cover_url || "", addedBy: r.added_by, createdAt: r.created_at };
+  return { id: r.id, title: r.title, author: r.author || "", isbn: r.isbn || "", category: r.category || "", subject: r.subject || "", className: r.class_name || "", totalCopies: r.total_copies, availableCopies: r.available_copies, coverUrl: r.cover_url || "", addedBy: r.added_by, createdAt: r.created_at };
 }
 async function fetchLibraryBooks(token) {
   const rows = await pgFetch("library_books?select=*&order=title", token);
@@ -449,7 +460,7 @@ async function fetchLibraryBooks(token) {
 async function addLibraryBookRow(token, book, addedBy) {
   const [row] = await pgFetch("library_books", token, {
     method: "POST",
-    body: { title: book.title, author: book.author || null, isbn: book.isbn || null, category: book.category || null, total_copies: book.totalCopies, available_copies: book.totalCopies, cover_url: book.coverUrl || null, added_by: addedBy },
+    body: { title: book.title, author: book.author || null, isbn: book.isbn || null, category: book.category || null, subject: book.subject || null, class_name: book.className || null, total_copies: book.totalCopies, available_copies: book.totalCopies, cover_url: book.coverUrl || null, added_by: addedBy },
   });
   return mapLibraryBookRow(row);
 }
@@ -1576,6 +1587,10 @@ export default function App() {
     const row = await updateVisitorFollowUp(authedUser.accessToken, id, followUp);
     setVisitors((prev) => prev.map((v) => (v.id === id ? row : v)));
   };
+  const completeFollowUp = async (id) => {
+    const row = await completeVisitorFollowUp(authedUser.accessToken, id);
+    setVisitors((prev) => prev.map((v) => (v.id === id ? row : v)));
+  };
   const deleteVisitor = async (id) => {
     await deleteVisitorRow(authedUser.accessToken, id);
     setVisitors((prev) => prev.filter((v) => v.id !== id));
@@ -1784,7 +1799,7 @@ export default function App() {
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
     generateLessonPlan,
-    visitors, addVisitor, setVisitorFollowUp, deleteVisitor,
+    visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
     libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook,
     addStudent, deleteStudent, updateStudent, promoteClassStudents, addStaff, markAttendance, setGrade, saveGrade, recordPayment, recordPaymentBatch, showToast,
@@ -2612,6 +2627,20 @@ function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
   const reminders = outstanding.filter((i) => i.reminderDate && i.reminderDate <= todayStr && (!i.dueDate || i.dueDate >= todayStr));
   const bookTitle = (id) => libraryBooks.find((b) => b.id === id)?.title || "—";
 
+  // Shelves = the book categories. Course books are further broken down by
+  // subject and class; anything filed under an older free-text category
+  // lands on an "Other" shelf so nothing disappears from the count.
+  const shelfOf = (b) => (BOOK_SHELVES.includes(b.category) ? b.category : "Other");
+  const shelfNames = [...BOOK_SHELVES, ...(libraryBooks.some((b) => shelfOf(b) === "Other") ? ["Other"] : [])];
+  const shelves = shelfNames.map((name) => {
+    const books = libraryBooks.filter((b) => shelfOf(b) === name);
+    return { name, titles: books.length, copies: books.reduce((n, b) => n + b.totalCopies, 0) };
+  });
+  const courseBooks = libraryBooks.filter((b) => b.category === "Course Books");
+  const courseClasses = [...new Set(courseBooks.map((b) => b.className || "Unassigned"))].sort();
+  const courseSubjects = [...new Set(courseBooks.map((b) => b.subject || "Unassigned"))].sort();
+  const courseCount = (subj, cls) => courseBooks.filter((b) => (b.subject || "Unassigned") === subj && (b.className || "Unassigned") === cls).reduce((n, b) => n + b.totalCopies, 0);
+
   const cards = [
     { label: "Books in catalogue", value: libraryBooks.length, sub: `${totalCopies} total copies`, icon: Library, bg: "#EAF3FF", tone: "#245B91" },
     { label: "Currently issued", value: outstanding.length, sub: "Not yet returned", icon: BookOpen, bg: "#F6F0FF", tone: "#6B4FA1" },
@@ -2636,6 +2665,46 @@ function LibrarianDashboard({ libraryBooks, bookIssues, setView }) {
             <div style={{ fontSize: 11, color: "#6b6656", marginTop: 3 }}>{sub}</div>
           </div>
         ))}
+      </div>
+
+      <div className="dashboard-section" style={{ background: "#EAF3FF", marginTop: 14, marginBottom: 14 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+          <div><div style={{ fontSize: 11, fontWeight: 700, color: "#245B91", textTransform: "uppercase" }}>Shelves</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Total books on each shelf (by category)</div></div>
+          <Library size={18} color="#245B91" />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {shelves.map((sh) => (
+            <div key={sh.name} style={{ background: "rgba(255,255,255,.8)", borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11.5, fontWeight: 700, color: "#245B91" }}>{sh.name}</div>
+              <div style={{ fontFamily: MONO_FONT, fontSize: 20, fontWeight: 700, color: INK, marginTop: 2 }}>{sh.copies}</div>
+              <div style={{ fontSize: 10.5, color: "#6b6656" }}>{sh.titles} title{sh.titles === 1 ? "" : "s"}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#245B91", textTransform: "uppercase", margin: "16px 0 8px" }}>Course Books — total per subject per class</div>
+        {courseBooks.length ? (
+          <div style={{ overflowX: "auto", background: "rgba(255,255,255,.8)", borderRadius: 10 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#EFE9D8" }}>
+                  <th style={{ padding: "7px 10px", textAlign: "left", fontSize: 11, color: "#4A4536", textTransform: "uppercase" }}>Subject</th>
+                  {courseClasses.map((c) => <th key={c} style={{ padding: "7px 10px", fontSize: 11, color: "#4A4536", textTransform: "uppercase" }}>{c}</th>)}
+                  <th style={{ padding: "7px 10px", fontSize: 11, color: "#4A4536", textTransform: "uppercase" }}>Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {courseSubjects.map((subj) => (
+                  <tr key={subj} style={{ borderTop: `1px solid ${LINE}` }}>
+                    <td style={{ padding: "6px 10px", fontWeight: 600 }}>{subj}</td>
+                    {courseClasses.map((c) => <td key={c} style={{ padding: "6px 10px", textAlign: "center", fontFamily: MONO_FONT }}>{courseCount(subj, c) || "—"}</td>)}
+                    <td style={{ padding: "6px 10px", textAlign: "center", fontFamily: MONO_FONT, fontWeight: 700 }}>{courseClasses.reduce((n, c) => n + courseCount(subj, c), 0)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <div style={{ fontSize: 12, color: "#7A7568", padding: "6px 0" }}>No course books yet — add one under Library with the "Course Books" shelf, a subject and a class.</div>}
       </div>
 
       <div className="dashboard-section" style={{ background: "#FFF7EA", marginTop: 14, marginBottom: 14 }}>
@@ -2674,7 +2743,7 @@ function ReceptionistDashboard({ visitors, appointments, setView }) {
   const todayStr = new Date().toISOString().slice(0, 10);
   const todaysVisitors = visitors.filter((v) => v.date === todayStr);
   const recent = [...visitors].slice(0, 6);
-  const dueFollowUps = visitors.filter((v) => v.reminderDate && v.reminderDate <= todayStr);
+  const dueFollowUps = visitors.filter((v) => v.followUp && v.followUpStatus !== "Completed" && ((v.reminderDate && v.reminderDate <= todayStr) || (v.followUpDate && v.followUpDate <= todayStr)));
   const todaysAppointments = appointments.filter((a) => a.date === todayStr);
 
   const cards = [
@@ -5885,6 +5954,12 @@ const EXTERNAL_RESOURCES = [
     url: "https://mwalimuapp.com/lesson-plan/",
     provider: "Mwalimu App",
   },
+  {
+    title: "Online Bible",
+    description: "Read and search the Bible online in many translations — opens in a new tab.",
+    url: "https://www.biblegateway.com",
+    provider: "BibleGateway",
+  },
 ];
 
 /* ---------------------------------------------------------------------- *
@@ -7133,7 +7208,7 @@ function fmtClockTime(iso) {
 /* ---------------------------------------------------------------------- *
  *  FRONT OFFICE — Receptionist logs visitors (name, reason, date, comments)
  * ---------------------------------------------------------------------- */
-function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, deleteVisitor, appointments, addAppointment, deleteAppointment, showToast }) {
+function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor, appointments, addAppointment, deleteAppointment, showToast }) {
   const [form, setForm] = useState({ name: "", reason: "", date: new Date().toISOString().slice(0, 10), comments: "" });
   const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -7195,7 +7270,9 @@ function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, deleteVisit
           <span>Date</span><span>Visitor</span><span>Reason</span><span>Follow-up</span><span></span><span></span>
         </div>
         {visitors.map((v) => {
-          const reminderDue = v.reminderDate && v.reminderDate <= todayStr;
+          const completed = v.followUpStatus === "Completed";
+          const isDue = !!v.followUp && !completed && ((v.reminderDate && v.reminderDate <= todayStr) || (v.followUpDate && v.followUpDate <= todayStr));
+          const overdue = isDue && v.followUpDate && v.followUpDate < todayStr;
           return (
             <div key={v.id} style={{ borderBottom: `1px solid ${LINE}` }}>
               <div style={{ display: "grid", gridTemplateColumns: "0.8fr 1.1fr 1fr 1.6fr 0.6fr 0.4fr", padding: "9px 16px", fontSize: 13, alignItems: "center" }}>
@@ -7206,18 +7283,30 @@ function FrontOfficeView({ visitors, addVisitor, setVisitorFollowUp, deleteVisit
                   <span style={{ fontSize: 12 }}>
                     {v.followUp}
                     {v.followUpDate && <span style={{ color: "#6b6656" }}> — by {v.followUpDate}</span>}
-                    {reminderDue && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#a1442c", background: "#FBECEC", borderRadius: 999, padding: "2px 7px" }}>REMINDER DUE</span>}
+                    {completed && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#2F6F4A", background: "#EEF8F0", borderRadius: 999, padding: "2px 7px" }}>COMPLETED{v.followUpCompletedDate ? ` ${v.followUpCompletedDate}` : ""}</span>}
+                    {isDue && <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, color: "#a1442c", background: "#FBECEC", borderRadius: 999, padding: "2px 7px" }}>{overdue ? "OVERDUE" : "DUE"}</span>}
                   </span>
                 ) : <span style={{ color: "#c4bda7", fontSize: 12 }}>No follow-up set</span>}
                 <button onClick={() => startFollowUp(v)} className="focus-ring" style={{ justifySelf: "end", padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{v.followUp ? "Edit" : "Add"}</button>
                 <button onClick={() => { if (window.confirm(`Delete the visitor log entry for ${v.name}?`)) deleteVisitor(v.id); }} className="focus-ring" title="Delete entry" style={{ justifySelf: "end", background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
+              {isDue && editingId !== v.id && (
+                <div className="flex items-center gap-2 flex-wrap" style={{ margin: "0 16px 12px", padding: "10px 12px", borderRadius: 10, background: "#FFF7EA", border: "1px solid #F0DDB8" }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: "#7a5a1c", flex: 1 }}>The follow-up for {v.name} is due. Is it complete? Close it, or extend the dates if it's still pending.</span>
+                  <button
+                    onClick={async () => { try { await completeFollowUp(v.id); showToast("Follow-up completed and closed"); } catch (err) { showToast(err.message || "Couldn't close follow-up"); } }}
+                    className="focus-ring" style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: "#2F6F4A", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                  >Complete &amp; Close</button>
+                  <button onClick={() => startFollowUp(v)} className="focus-ring" style={{ padding: "6px 12px", borderRadius: 8, border: "1px solid #D9B66A", background: "#fff", color: "#7a5a1c", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Extend dates</button>
+                </div>
+              )}
               {editingId === v.id && (
                 <div className="flex items-end gap-3 flex-wrap" style={{ padding: "0 16px 14px" }}>
                   <Field label="Follow up"><input value={followForm.followUp} onChange={(e) => setFollowForm((f) => ({ ...f, followUp: e.target.value }))} placeholder="What needs following up?" className="focus-ring" style={{ ...inputStyle, width: 240 }} /></Field>
                   <Field label="Follow-up date"><input type="date" value={followForm.followUpDate} onChange={(e) => setFollowForm((f) => ({ ...f, followUpDate: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
                   <Field label="Reminder date"><input type="date" value={followForm.reminderDate} onChange={(e) => setFollowForm((f) => ({ ...f, reminderDate: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
                   <button onClick={() => saveFollowUp(v.id)} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Save</button>
+                  {v.followUp && !completed && <button onClick={async () => { try { await completeFollowUp(v.id); showToast("Follow-up completed and closed"); setEditingId(null); } catch (err) { showToast(err.message || "Couldn't close follow-up"); } }} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: "#2F6F4A", color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Complete &amp; Close</button>}
                   <button onClick={() => setEditingId(null)} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
                 </div>
               )}
@@ -7291,9 +7380,9 @@ function AppointmentsBook({ appointments, addAppointment, deleteAppointment, sho
 /* ---------------------------------------------------------------------- *
  *  LIBRARY — Librarian adds books and tracks issue/return
  * ---------------------------------------------------------------------- */
-function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook, showToast, students, staff, classes, uploadPhoto }) {
+function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBook, issueBook, returnBook, showToast, students, staff, classes, subjects, uploadPhoto }) {
   const [tab, setTab] = useState("books");
-  const [bookForm, setBookForm] = useState({ title: "", author: "", isbn: "", category: "", totalCopies: 1 });
+  const [bookForm, setBookForm] = useState({ title: "", author: "", isbn: "", category: BOOK_SHELVES[0], subject: "", className: "", totalCopies: 1 });
   const [coverFile, setCoverFile] = useState(null);
   const [coverPreview, setCoverPreview] = useState("");
   const [issueForm, setIssueForm] = useState({
@@ -7314,13 +7403,14 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
   const submitBook = async (e) => {
     e.preventDefault();
     if (!bookForm.title.trim()) { showToast("Book title is required"); return; }
+    if (bookForm.category === "Course Books" && (!bookForm.subject || !bookForm.className)) { showToast("Pick the subject and class for a course book"); return; }
     setSaving(true);
     try {
       let coverUrl = "";
       if (coverFile) coverUrl = await uploadPhoto(coverFile, "library");
       await addLibraryBook({ ...bookForm, totalCopies: Number(bookForm.totalCopies) || 1, coverUrl });
       showToast(`Added "${bookForm.title}" to the library`);
-      setBookForm({ title: "", author: "", isbn: "", category: "", totalCopies: 1 });
+      setBookForm({ title: "", author: "", isbn: "", category: BOOK_SHELVES[0], subject: "", className: "", totalCopies: 1 });
       setCoverFile(null); setCoverPreview("");
     } catch (err) {
       showToast(err.message || "Couldn't add book");
@@ -7389,7 +7479,17 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
               </Field>
               <Field label="Title"><input value={bookForm.title} onChange={setB("title")} className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
               <Field label="Author"><input value={bookForm.author} onChange={setB("author")} className="focus-ring" style={{ ...inputStyle, width: 160 }} /></Field>
-              <Field label="Category"><input value={bookForm.category} onChange={setB("category")} placeholder="e.g. Fiction" className="focus-ring" style={{ ...inputStyle, width: 140 }} /></Field>
+              <Field label="Shelf (category)">
+                <select value={bookForm.category} onChange={(e) => setBookForm((f) => ({ ...f, category: e.target.value, subject: "", className: "" }))} className="focus-ring" style={{ ...inputStyle, width: 170 }}>
+                  {BOOK_SHELVES.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </Field>
+              {bookForm.category === "Course Books" && (
+                <>
+                  <Field label="Subject"><select value={bookForm.subject} onChange={setB("subject")} className="focus-ring" style={{ ...inputStyle, width: 170 }}><option value="">Select subject…</option>{subjects.map((x) => <option key={x}>{x}</option>)}</select></Field>
+                  <Field label="Class"><select value={bookForm.className} onChange={setB("className")} className="focus-ring" style={{ ...inputStyle, width: 130 }}><option value="">Select class…</option>{classes.map((x) => <option key={x}>{x}</option>)}</select></Field>
+                </>
+              )}
               <Field label="ISBN"><input value={bookForm.isbn} onChange={setB("isbn")} className="focus-ring" style={{ ...inputStyle, width: 140 }} /></Field>
               <Field label="Copies"><input type="number" min={1} value={bookForm.totalCopies} onChange={setB("totalCopies")} className="focus-ring" style={{ ...inputStyle, width: 90 }} /></Field>
               <button type="submit" disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Add Book"}</button>
@@ -7407,7 +7507,7 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
                 </span>
                 <span style={{ fontWeight: 600 }}>{b.title}</span>
                 <span style={{ color: "#6b6656" }}>{b.author || "—"}</span>
-                <span>{b.category || "—"}</span>
+                <span>{b.category || "—"}{b.category === "Course Books" && (b.subject || b.className) ? <span style={{ display: "block", fontSize: 11, color: "#6b6656" }}>{[b.subject, b.className].filter(Boolean).join(" · ")}</span> : null}</span>
                 <span style={{ fontFamily: MONO_FONT }}>{b.availableCopies} / {b.totalCopies}</span>
                 <button onClick={() => { if (window.confirm(`Remove "${b.title}" from the library?`)) deleteLibraryBook(b.id); }} className="focus-ring" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer", justifySelf: "end" }}><Trash2 size={14} /></button>
               </div>
