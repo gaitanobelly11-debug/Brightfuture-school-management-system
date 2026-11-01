@@ -1057,6 +1057,7 @@ export default function App() {
   const [appointments, setAppointments] = useState([]);
   const [libraryBooks, setLibraryBooks] = useState([]);
   const [bookIssues, setBookIssues] = useState([]);
+  const [leaveRequests, setLeaveRequests] = useState([]);
   const [view, setView] = useState("dashboard");
   const [attendanceLanding, setAttendanceLanding] = useState("students");
   const [toast, setToast] = useState(null);
@@ -1088,7 +1089,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1101,6 +1102,7 @@ export default function App() {
         fetchAppointments(token).catch(() => []),
         fetchLibraryBooks(token).catch(() => []),
         fetchBookIssues(token).catch(() => []),
+        fetchLeaveRequests(token).catch(() => []),
       ]);
       setStudents(school.students);
       setGrades(school.grades);
@@ -1115,6 +1117,7 @@ export default function App() {
       setAppointments(appointmentRows);
       setLibraryBooks(libraryBookRows);
       setBookIssues(bookIssueRows);
+      setLeaveRequests(leaveRows);
       setStaff(staffRows);
       setClasses(classNames.length ? classNames : FALLBACK_CLASSES);
       setSubjects(subjectNames.length ? subjectNames : FALLBACK_SUBJECTS);
@@ -1418,6 +1421,18 @@ export default function App() {
     };
     setPayslips((prev) => [slip, ...prev.filter((p) => !(p.staffId === slip.staffId && p.month === month && p.year === year))]);
     return slip;
+  };
+  const addLeave = async (leave) => {
+    const row = await addLeaveRow(authedUser.accessToken, leave, authedUser.id);
+    setLeaveRequests((prev) => [row, ...prev]);
+  };
+  const decideLeave = async (id, status) => {
+    const row = await decideLeaveRow(authedUser.accessToken, id, status, authedUser.id);
+    setLeaveRequests((prev) => prev.map((l) => (l.id === id ? row : l)));
+  };
+  const deleteLeave = async (id) => {
+    await deleteLeaveRow(authedUser.accessToken, id);
+    setLeaveRequests((prev) => prev.filter((l) => l.id !== id));
   };
   const deletePayslip = async (id) => {
     await pgFetch(`payslips?id=eq.${id}`, authedUser.accessToken, { method: "DELETE", prefer: "return=minimal" });
@@ -1798,6 +1813,7 @@ export default function App() {
     timetableAssignments, timetableSettings, timetableEntries,
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
+    leaveRequests, addLeave, decideLeave, deleteLeave,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
@@ -2544,7 +2560,7 @@ function TeacherDashboard({ authedUser, students, attendance, classes, events, e
 /* ---------------------------------------------------------------------- *
  *  CLERK DASHBOARD — fees collection + HR/payroll at a glance
  * ---------------------------------------------------------------------- */
-function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll, payslips, setView }) {
+function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll, payslips, leaveRequests, setView }) {
   const totalDue = students.reduce((s, st) => s + (feeStructure[st.class] || 0), 0);
   const schoolFeesPayments = payments.filter((p) => p.account === "School Fees");
   const totalPaid = schoolFeesPayments.reduce((s, p) => s + p.amount, 0);
@@ -2590,14 +2606,20 @@ function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll,
           <div><div style={{ fontSize: 11, fontWeight: 700, color: "#A1702C", textTransform: "uppercase" }}>Pending Activities</div><div style={{ fontSize: 11, color: "#6b6656", marginTop: 2 }}>Things that still need your attention</div></div>
           <AlertTriangle size={18} color="#A1702C" />
         </div>
+        {(leaveRequests || []).filter((l) => l.status === "Pending").length > 0 && (
+          <div className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px", marginBottom: 7 }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>{(leaveRequests || []).filter((l) => l.status === "Pending").length} leave request(s) awaiting approval</span>
+            <button onClick={() => setView("hr")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Review</button>
+          </div>
+        )}
         {payrollPending > 0 ? (
           <div className="flex items-center justify-between gap-3" style={{ background: "rgba(255,255,255,.75)", borderRadius: 10, padding: "10px 12px" }}>
             <span style={{ fontSize: 13, fontWeight: 600 }}>Run payroll for {payrollPending} staff member{payrollPending === 1 ? "" : "s"} — {monthLabel}</span>
             <button onClick={() => setView("hr")} className="focus-ring" style={{ padding: "6px 14px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Do it now</button>
           </div>
-        ) : (
+        ) : (leaveRequests || []).filter((l) => l.status === "Pending").length === 0 ? (
           <div style={{ fontSize: 12.5, color: "#2F6F4A", padding: "6px 0" }}>You're all caught up — nothing pending right now.</div>
-        )}
+        ) : null}
       </div>
 
       <div className="dashboard-section" style={{ background: "#EEF8F0" }}>
@@ -5137,7 +5159,7 @@ function StaffPayModal({ staffMember, pay, onClose, onSave }) {
   );
 }
 
-function RunPayrollTab({ staff, staffPayroll, payrollSettings, payslips, generatePayslip, showToast, schoolSettings }) {
+function RunPayrollTab({ staff, staffPayroll, payrollSettings, payslips, generatePayslip, showToast, schoolSettings, leaveRequests }) {
   const now = new Date();
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [year, setYear] = useState(now.getFullYear());
@@ -5146,9 +5168,18 @@ function RunPayrollTab({ staff, staffPayroll, payrollSettings, payslips, generat
   const eligible = staff.filter((s) => staffPayroll.some((p) => p.staffId === s.id && p.basicSalary > 0));
   const alreadyGenerated = (staffId) => payslips.some((p) => p.staffId === staffId && p.month === month && p.year === year);
 
+  // Approved leave beyond entitlement (or unpaid/half-pay days) in the chosen
+  // month comes off the payslip as a "Leave deduction".
+  const leaveFor = (s) => {
+    const pay = staffPayroll.find((p) => p.staffId === s.id);
+    const gross = pay ? pay.basicSalary + pay.houseAllowance + pay.transportAllowance + pay.otherAllowance : 0;
+    return leaveDeductionForMonth(leaveRequests || [], s.id, month, year, gross);
+  };
   const runOne = async (s) => {
     const pay = staffPayroll.find((p) => p.staffId === s.id);
-    const slip = await generatePayslip(s, pay, month, year);
+    const leave = leaveFor(s);
+    const label = leave.amount > 0 ? `Leave deduction (${leave.deductedDays} day${leave.deductedDays === 1 ? "" : "s"})` : "";
+    const slip = await generatePayslip(s, pay, month, year, leave.amount, label);
     return slip;
   };
 
@@ -5177,8 +5208,8 @@ function RunPayrollTab({ staff, staffPayroll, payrollSettings, payslips, generat
       </div>
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "1.8fr 1fr 1fr 1fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
-          <span>Name</span><span>Gross</span><span>Status</span><span></span>
+        <div style={{ display: "grid", gridTemplateColumns: "1.8fr 1fr 1.1fr 1fr 1fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Name</span><span>Gross</span><span>Leave deduction</span><span>Status</span><span></span>
         </div>
         {eligible.map((s) => {
           const pay = staffPayroll.find((p) => p.staffId === s.id);
@@ -5186,9 +5217,12 @@ function RunPayrollTab({ staff, staffPayroll, payrollSettings, payslips, generat
           const done = alreadyGenerated(s.id);
           const existingSlip = payslips.find((p) => p.staffId === s.id && p.month === month && p.year === year);
           return (
-            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.8fr 1fr 1fr 1fr", padding: "10px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+            <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.8fr 1fr 1.1fr 1fr 1fr", padding: "10px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
               <span>{s.name}</span>
               <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{fmtKES(calc.gross)}</span>
+              <span style={{ fontFamily: MONO_FONT, fontSize: 12, color: (done ? existingSlip?.otherDeduction : leaveFor(s).amount) ? "#a1442c" : "#a39c86" }}>
+                {done ? (existingSlip?.otherDeduction ? fmtKES(existingSlip.otherDeduction) : "—") : (leaveFor(s).amount ? fmtKES(leaveFor(s).amount) : "—")}
+              </span>
               <span style={{ fontSize: 11.5, fontWeight: 700, color: done ? "#2f7a4d" : "#a39c86" }}>{done ? "Generated" : "Not yet"}</span>
               <div className="flex gap-2 justify-end">
                 {done ? (
@@ -7599,12 +7633,275 @@ function LibraryView({ libraryBooks, bookIssues, addLibraryBook, deleteLibraryBo
   );
 }
 
+/* ---------------------------------------------------------------------- *
+ *  LEAVE MANAGEMENT (under HR) — leave types with their entitlements, a
+ *  request/approval flow, per-staff balances, and salary deductions for
+ *  any days taken beyond an entitlement (or that are unpaid by nature).
+ * ---------------------------------------------------------------------- */
+// fullDays = days on full pay, halfDays = days on half pay after that. Days
+// beyond fullDays + halfDays are treated as unpaid. "working" counts Mon–Fri
+// only; "calendar" counts every day (used for the month-long leaves).
+const LEAVE_TYPES = [
+  { key: "Annual", label: "Annual Leave", fullDays: 21, halfDays: 0, unit: "working", policy: "21 days, full pay" },
+  { key: "Sick", label: "Sick Leave", fullDays: 7, halfDays: 7, unit: "working", policy: "7 days full pay, then 7 days half pay" },
+  { key: "Maternity", label: "Maternity Leave", fullDays: 90, halfDays: 0, unit: "calendar", policy: "3 months (90 days), full pay" },
+  { key: "Paternity", label: "Paternity Leave", fullDays: 14, halfDays: 0, unit: "calendar", policy: "14 days, full pay" },
+  { key: "Compassionate", label: "Compassionate Leave", fullDays: 3, halfDays: 0, unit: "working", policy: "3 days, full pay" },
+  { key: "Pre-adoptive", label: "Pre-adoptive Leave", fullDays: 30, halfDays: 0, unit: "calendar", policy: "1 month (30 days), full pay" },
+  { key: "Unpaid", label: "Unpaid Leave", fullDays: 0, halfDays: 0, allowance: 7, unit: "working", policy: "7 days, no pay" },
+  { key: "Study", label: "Study Leave", fullDays: 0, halfDays: 0, agreed: true, unit: "working", policy: "As agreed with the employer (pay terms set when recorded)" },
+];
+const leaveTypeOf = (key) => LEAVE_TYPES.find((t) => t.key === key);
+const leaveAllowance = (t) => (t.agreed ? null : (t.allowance != null ? t.allowance : t.fullDays + t.halfDays));
+const STUDY_PAY_FACTOR = { Full: 0, Half: 0.5, None: 1 }; // share of daily pay deducted
+const LEAVE_DAILY_DIVISOR = 30; // daily rate = monthly gross ÷ 30
+
+function mapLeaveRow(r) {
+  return { id: r.id, staffId: r.staff_id, type: r.leave_type, startDate: r.start_date, endDate: r.end_date, days: r.days, studyPay: r.study_pay || "", reason: r.reason || "", status: r.status, decidedAt: r.decided_at, createdAt: r.created_at };
+}
+async function fetchLeaveRequests(token) {
+  const rows = await pgFetch("leave_requests?select=*&order=start_date.desc", token);
+  return rows.map(mapLeaveRow);
+}
+async function addLeaveRow(token, leave, createdBy) {
+  const [row] = await pgFetch("leave_requests", token, {
+    method: "POST",
+    body: { staff_id: leave.staffId, leave_type: leave.type, start_date: leave.startDate, end_date: leave.endDate, days: leave.days, study_pay: leave.studyPay || null, reason: leave.reason || null, status: "Pending", created_by: createdBy },
+  });
+  return mapLeaveRow(row);
+}
+async function decideLeaveRow(token, id, status, decidedBy) {
+  const [row] = await pgFetch(`leave_requests?id=eq.${id}`, token, {
+    method: "PATCH",
+    body: { status, decided_by: decidedBy, decided_at: new Date().toISOString() },
+  });
+  return mapLeaveRow(row);
+}
+async function deleteLeaveRow(token, id) {
+  await pgFetch(`leave_requests?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
+}
+
+// The dates a leave covers, counted by the leave type's own rule (Mon–Fri
+// only, or every calendar day). UTC arithmetic keeps this timezone-proof.
+function leaveDates(startDate, endDate, unit) {
+  if (!startDate || !endDate || endDate < startDate) return [];
+  const out = [];
+  const [sy, sm, sd] = startDate.split("-").map(Number);
+  const [ey, em, ed] = endDate.split("-").map(Number);
+  const cur = new Date(Date.UTC(sy, sm - 1, sd));
+  const end = new Date(Date.UTC(ey, em - 1, ed));
+  while (cur <= end && out.length < 800) {
+    const dow = cur.getUTCDay();
+    if (unit === "calendar" || (dow !== 0 && dow !== 6)) out.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+
+// Every approved leave day for one staff member, in date order, with the
+// share of that day's pay to deduct (0 = full pay, 0.5 = half pay, 1 =
+// unpaid) — worked out against each leave type's yearly entitlement.
+function leaveCharges(leaves, staffId) {
+  const approved = leaves.filter((l) => l.staffId === staffId && l.status === "Approved");
+  const days = [];
+  approved.forEach((l) => {
+    const t = leaveTypeOf(l.type);
+    if (!t) return;
+    leaveDates(l.startDate, l.endDate, t.unit).forEach((date) => days.push({ date, type: l.type, studyPay: l.studyPay }));
+  });
+  days.sort((a, b) => a.date.localeCompare(b.date));
+  const seen = {}; // `${type}|${year}` -> days used so far
+  return days.map((d) => {
+    const t = leaveTypeOf(d.type);
+    const k = `${d.type}|${d.date.slice(0, 4)}`;
+    const idx = seen[k] || 0;
+    seen[k] = idx + 1;
+    let factor;
+    if (t.agreed) factor = STUDY_PAY_FACTOR[d.studyPay] ?? 0;
+    else if (t.key === "Unpaid") factor = 1;
+    else if (idx < t.fullDays) factor = 0;
+    else if (idx < t.fullDays + t.halfDays) factor = 0.5;
+    else factor = 1;
+    const allowance = leaveAllowance(t);
+    return { ...d, factor, exceeds: allowance != null && idx >= allowance };
+  });
+}
+
+// Salary deduction for one month: deducted share of each leave day × the
+// daily rate (monthly gross ÷ 30).
+function leaveDeductionForMonth(leaves, staffId, month, year, monthlyGross) {
+  const prefix = `${year}-${String(month).padStart(2, "0")}`;
+  const monthDays = leaveCharges(leaves, staffId).filter((d) => d.date.startsWith(prefix));
+  const deductedDays = monthDays.reduce((n, d) => n + d.factor, 0);
+  const amount = Math.round((monthlyGross / LEAVE_DAILY_DIVISOR) * deductedDays);
+  return { amount, deductedDays, leaveDays: monthDays.length };
+}
+
+function LeaveTab({ staff, staffPayroll, leaveRequests, addLeave, decideLeave, deleteLeave, showToast }) {
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const [form, setForm] = useState({ staffId: "", type: "Annual", startDate: todayStr, endDate: todayStr, studyPay: "Full", reason: "" });
+  const [saving, setSaving] = useState(false);
+  const [balanceStaff, setBalanceStaff] = useState("");
+  const [balanceYear, setBalanceYear] = useState(now.getFullYear());
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const type = leaveTypeOf(form.type);
+  const dates = leaveDates(form.startDate, form.endDate, type.unit);
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "—";
+  const grossOf = (id) => {
+    const p = staffPayroll.find((x) => x.staffId === id);
+    return p ? p.basicSalary + p.houseAllowance + p.transportAllowance + p.otherAllowance : 0;
+  };
+
+  // Warn up front if this request would run past the entitlement.
+  const usedBefore = form.staffId
+    ? leaveCharges(leaveRequests, form.staffId).filter((d) => d.type === form.type && d.date.startsWith(String(form.startDate.slice(0, 4)))).length
+    : 0;
+  const allowance = leaveAllowance(type);
+  const overBy = allowance != null ? Math.max(0, usedBefore + dates.length - allowance) : 0;
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.staffId) { showToast("Pick a staff member"); return; }
+    if (dates.length === 0) { showToast("Check the dates — the leave has no countable days"); return; }
+    setSaving(true);
+    try {
+      await addLeave({ ...form, days: dates.length });
+      showToast(`Leave recorded for ${staffName(form.staffId)} — awaiting approval`);
+      setForm((f) => ({ ...f, reason: "" }));
+    } catch (err) {
+      showToast(err.message || "Couldn't record leave");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const decide = async (l, status) => {
+    try { await decideLeave(l.id, status); showToast(`Leave ${status.toLowerCase()}`); }
+    catch (err) { showToast(err.message || "Couldn't update leave"); }
+  };
+
+  const sorted = [...leaveRequests].sort((a, b) => (a.status === "Pending" ? -1 : 0) - (b.status === "Pending" ? -1 : 0) || b.startDate.localeCompare(a.startDate));
+  const statusStyle = (st) => st === "Approved" ? { color: "#2F6F4A", background: "#EEF8F0" } : st === "Rejected" ? { color: "#a1442c", background: "#FBECEC" } : { color: "#A1702C", background: "#FFF3DC" };
+
+  // Balances for the chosen staff member and year.
+  const balStaffId = balanceStaff || staff[0]?.id || "";
+  const balCharges = balStaffId ? leaveCharges(leaveRequests, balStaffId).filter((d) => d.date.startsWith(String(balanceYear))) : [];
+  const balGross = grossOf(balStaffId);
+  const yearDeduction = Math.round((balGross / LEAVE_DAILY_DIVISOR) * balCharges.reduce((n, d) => n + d.factor, 0));
+
+  return (
+    <div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 10 }}>Leave policy</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
+          {LEAVE_TYPES.map((t) => (
+            <div key={t.key} style={{ fontSize: 12.5, padding: "8px 10px", borderRadius: 8, background: "#F4F8FD" }}>
+              <b>{t.label}</b><div style={{ color: "#6b6656", marginTop: 1 }}>{t.policy}</div>
+            </div>
+          ))}
+        </div>
+        <p style={{ fontSize: 11.5, color: "#7A7568", marginTop: 10 }}>Days taken beyond an entitlement are deducted from salary at the daily rate (monthly gross ÷ {LEAVE_DAILY_DIVISOR}). Half-pay days deduct half a day; unpaid days deduct a full day. Day counts use working days (Mon–Fri), except maternity, paternity and pre-adoptive leave, which count calendar days.</p>
+      </div>
+
+      <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Record leave</h3>
+        <div className="flex items-end gap-3 flex-wrap">
+          <Field label="Staff member"><select value={form.staffId} onChange={set("staffId")} className="focus-ring" style={{ ...inputStyle, width: 200 }}><option value="">Select staff…</option>{staff.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.role})</option>)}</select></Field>
+          <Field label="Leave type"><select value={form.type} onChange={set("type")} className="focus-ring" style={{ ...inputStyle, width: 190 }}>{LEAVE_TYPES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}</select></Field>
+          <Field label="From"><input type="date" value={form.startDate} onChange={set("startDate")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+          <Field label="To"><input type="date" value={form.endDate} min={form.startDate} onChange={set("endDate")} className="focus-ring" style={{ ...inputStyle, width: 150 }} /></Field>
+          {type.agreed && (
+            <Field label="Pay agreed"><select value={form.studyPay} onChange={set("studyPay")} className="focus-ring" style={{ ...inputStyle, width: 130 }}><option value="Full">Full pay</option><option value="Half">Half pay</option><option value="None">No pay</option></select></Field>
+          )}
+          <Field label="Reason (optional)"><input value={form.reason} onChange={set("reason")} className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
+          <button type="submit" disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : "Record Leave"}</button>
+        </div>
+        <div style={{ fontSize: 12, marginTop: 10, color: "#6b6656" }}>
+          {dates.length} {type.unit === "calendar" ? "calendar" : "working"} day{dates.length === 1 ? "" : "s"}
+          {allowance != null && form.staffId && <> · used so far this year: {usedBefore} of {allowance}</>}
+          {overBy > 0 && <span style={{ marginLeft: 8, fontWeight: 700, color: "#a1442c" }}>This goes {overBy} day{overBy === 1 ? "" : "s"} over the entitlement — the excess will be deducted from salary.</span>}
+        </div>
+      </form>
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Leave requests</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 24 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1.1fr 1.4fr 0.5fr 0.8fr 1.3fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Staff</span><span>Type</span><span>Dates</span><span>Days</span><span>Status</span><span></span>
+        </div>
+        {sorted.map((l) => (
+          <div key={l.id} style={{ display: "grid", gridTemplateColumns: "1.3fr 1.1fr 1.4fr 0.5fr 0.8fr 1.3fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+            <span style={{ fontWeight: 600 }}>{staffName(l.staffId)}</span>
+            <span>{leaveTypeOf(l.type)?.label || l.type}{l.type === "Study" && l.studyPay ? <span style={{ display: "block", fontSize: 11, color: "#6b6656" }}>{l.studyPay === "None" ? "No pay" : `${l.studyPay} pay`}</span> : null}</span>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{l.startDate} → {l.endDate}</span>
+            <span style={{ fontFamily: MONO_FONT }}>{l.days}</span>
+            <span><span style={{ fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px", ...statusStyle(l.status) }}>{l.status.toUpperCase()}</span></span>
+            <div className="flex gap-1.5 justify-end">
+              {l.status === "Pending" && (
+                <>
+                  <button onClick={() => decide(l, "Approved")} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: "none", background: "#2F6F4A", color: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Approve</button>
+                  <button onClick={() => decide(l, "Rejected")} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", color: "#a1442c", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Reject</button>
+                </>
+              )}
+              <button onClick={() => { if (window.confirm("Delete this leave record?")) deleteLeave(l.id).catch((err) => showToast(err.message || "Couldn't delete")); }} className="focus-ring" title="Delete" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={14} /></button>
+            </div>
+          </div>
+        ))}
+        {sorted.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No leave recorded yet.</div>}
+      </div>
+
+      <div className="flex items-end gap-3 mb-3 flex-wrap">
+        <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", alignSelf: "center" }}>Leave balances</div>
+        <Field label="Staff member"><select value={balStaffId} onChange={(e) => setBalanceStaff(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 220 }}>{staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+        <Field label="Year"><input type="number" value={balanceYear} onChange={(e) => setBalanceYear(Number(e.target.value) || now.getFullYear())} className="focus-ring" style={{ ...inputStyle, width: 100 }} /></Field>
+      </div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr 0.8fr 1fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Leave type</span><span>Entitled</span><span>Used</span><span>Left</span><span>Excess</span><span>Deduction</span>
+        </div>
+        {LEAVE_TYPES.map((t) => {
+          const mine = balCharges.filter((d) => d.type === t.key);
+          const used = mine.length;
+          const al = leaveAllowance(t);
+          const excess = al != null ? Math.max(0, used - al) : 0;
+          const ded = Math.round((balGross / LEAVE_DAILY_DIVISOR) * mine.reduce((n, d) => n + d.factor, 0));
+          return (
+            <div key={t.key} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr 0.8fr 1fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+              <span style={{ fontWeight: 600 }}>{t.label}</span>
+              <span style={{ fontFamily: MONO_FONT }}>{al == null ? "Agreed" : al}</span>
+              <span style={{ fontFamily: MONO_FONT }}>{used}</span>
+              <span style={{ fontFamily: MONO_FONT }}>{al == null ? "—" : Math.max(0, al - used)}</span>
+              <span style={{ fontFamily: MONO_FONT, color: excess ? "#a1442c" : INK, fontWeight: excess ? 700 : 400 }}>{excess || "—"}</span>
+              <span style={{ fontFamily: MONO_FONT, color: ded ? "#a1442c" : INK }}>{ded ? fmtKES(ded) : "—"}</span>
+            </div>
+          );
+        })}
+        <div className="flex items-center justify-between" style={{ padding: "10px 16px", fontSize: 13, fontWeight: 700, background: "#F4F8FD" }}>
+          <span>Total salary deduction for {balanceYear}</span>
+          <span style={{ fontFamily: MONO_FONT, color: yearDeduction ? "#a1442c" : INK }}>{balGross ? fmtKES(yearDeduction) : "Set salary in Payroll first"}</span>
+        </div>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#7A7568", marginTop: 8 }}>Only approved leave counts towards balances and deductions. Deductions are applied automatically when payroll is run for the month the leave falls in.</p>
+    </div>
+  );
+}
+
 function HRView(ctx) {
+  const [tab, setTab] = useState("payroll");
+  const pending = (ctx.leaveRequests || []).filter((l) => l.status === "Pending").length;
   return (
     <div className="px-7 py-6" style={{ maxWidth: 1180 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>HR</h2>
-      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Staff payroll and compensation. (Teacher attendance confirmation is now under the Attendance tab.)</p>
-      <PayrollView {...ctx} />
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 14 }}>Staff payroll, compensation and leave. (Teacher attendance confirmation is under the Attendance tab.)</p>
+      <div className="flex gap-4 mb-4" style={{ borderBottom: `1px solid ${LINE}` }}>
+        {[["payroll", "Payroll"], ["leave", "Leave"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)} className="focus-ring" style={{ padding: "8px 4px", background: "none", border: "none", borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent", fontSize: 13.5, fontWeight: 700, color: tab === id ? INK : "#9a9484", cursor: "pointer" }}>
+            {label}{id === "leave" && pending > 0 && <span style={{ marginLeft: 6, fontSize: 10.5, background: ACCENT, color: "#fff", borderRadius: 999, padding: "1px 7px" }}>{pending}</span>}
+          </button>
+        ))}
+      </div>
+      {tab === "payroll" ? <PayrollView {...ctx} /> : <LeaveTab {...ctx} />}
     </div>
   );
 }
