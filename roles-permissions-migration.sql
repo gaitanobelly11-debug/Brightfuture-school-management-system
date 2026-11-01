@@ -304,3 +304,26 @@ ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up_status text NOT NULL DEF
 ALTER TABLE visitors ADD COLUMN IF NOT EXISTS follow_up_completed_date date;
 ALTER TABLE library_books ADD COLUMN IF NOT EXISTS subject text;
 ALTER TABLE library_books ADD COLUMN IF NOT EXISTS class_name text;
+
+-- HR leave management: leave requests per staff member (Admin + Clerk only).
+CREATE TABLE IF NOT EXISTS leave_requests (
+  id uuid primary key default gen_random_uuid(),
+  staff_id uuid not null references public.staff_profiles(id) on delete cascade,
+  leave_type text not null,
+  start_date date not null,
+  end_date date not null,
+  days integer not null,
+  study_pay text,
+  reason text,
+  status text not null default 'Pending',
+  decided_by uuid references public.staff_profiles(id),
+  decided_at timestamptz,
+  created_by uuid references public.staff_profiles(id),
+  created_at timestamptz not null default now()
+);
+CREATE INDEX IF NOT EXISTS leave_requests_staff_idx ON leave_requests (staff_id, start_date);
+ALTER TABLE leave_requests ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "leave_requests_admin_clerk" ON leave_requests
+  FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
