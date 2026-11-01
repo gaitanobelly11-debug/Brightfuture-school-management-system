@@ -327,3 +327,15 @@ CREATE POLICY "leave_requests_admin_clerk" ON leave_requests
   FOR ALL
   USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
   WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
+
+-- Every staff member can read (only) their own payslips, so they can
+-- download them from the Attachments tab.
+CREATE POLICY "payslips_staff_read_own" ON public.payslips
+  FOR SELECT
+  USING (staff_id = auth.uid());
+
+-- A staff member can read their own payroll details row (KRA PIN, bank, etc.)
+-- so their downloaded payslip shows the full employee details.
+CREATE POLICY "staff_payroll_read_own" ON public.staff_payroll
+  FOR SELECT
+  USING (staff_id = auth.uid());
