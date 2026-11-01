@@ -6,7 +6,7 @@ import {
   BadgeCheck, AlertTriangle, LogOut, Settings2, ImagePlus, MapPin, Compass,
   ClipboardList, Lock, Sliders, Printer, Eye, Download, Award, CalendarDays, Bell, Send, UserRound,
   UserCheck, LogIn, DoorOpen, CalendarRange, Wand2, RefreshCw, BookOpen, ExternalLink,
-  Contact, Library, BookPlus, Undo2
+  Contact, Library, BookPlus, Undo2, Paperclip
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- *
@@ -1923,6 +1923,7 @@ export default function App() {
                 {view === "exams" && <ExamsView {...ctx} />}
                 {view === "timetable" && <TimetableView {...ctx} />}
                 {view === "notifications" && <NotificationsView {...ctx} />}
+                {view === "attachments" && <AttachmentsView {...ctx} />}
                 {view === "resources" && <ResourcesView {...ctx} />}
                 {view === "communication" && isAdmin && <CommunicationView {...ctx} />}
                 {view === "events" && <EventsView {...ctx} />}
@@ -2195,6 +2196,7 @@ function Sidebar({ view, setView, role, menuOpen }) {
     { id: "timetable", label: "Timetable", icon: CalendarRange, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher"] },
     { id: "notifications", label: "Notifications", icon: Bell, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher", "Clerk", "Receptionist", "Librarian", "Subordinate Staff"] },
     { id: "resources", label: "Resources", icon: BookOpen, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher"] },
+    { id: "attachments", label: "Attachments", icon: Paperclip, roles: STAFF_ROLES },
     { id: "communication", label: "Communication", icon: Send, roles: ADMIN_ROLES },
     { id: "events", label: "Events", icon: CalendarDays, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "frontoffice", label: "Front Office", icon: Contact, roles: ["Admin", "Receptionist"] },
@@ -5385,6 +5387,58 @@ function buildPayslipHtml({ staff, pay, slip, schoolSettings }) {
     </div>
     <div style="font-size:10.5px;color:#777;margin-top:6px;">Generated ${new Date(slip.createdAt || Date.now()).toLocaleDateString()}</div>
   `;
+}
+
+// Each employee's own documents. Payslips for now (pick a month, download);
+// more attachment types can be added as further sections later.
+function AttachmentsView({ authedUser, staff, payslips, staffPayroll, schoolSettings, showToast }) {
+  const me = staff.find((s) => s.id === authedUser.id) || { id: authedUser.id, name: authedUser.name, role: authedUser.role };
+  const myPay = staffPayroll.find((p) => p.staffId === authedUser.id);
+  const mine = payslips
+    .filter((p) => p.staffId === authedUser.id)
+    .sort((a, b) => b.year - a.year || b.month - a.month);
+  const [chosenId, setChosenId] = useState("");
+  const chosen = mine.find((p) => String(p.id) === String(chosenId)) || mine[0];
+
+  const download = (slip) => {
+    if (!slip) return;
+    printDocument(`Payslip ${PAYROLL_MONTHS[slip.month - 1]} ${slip.year} — ${slip.staffName}`, buildPayslipHtml({ staff: me, pay: myPay, slip, schoolSettings }));
+  };
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 820 }}>
+      <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Attachments</h2>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Your personal documents. More attachments will be added here over time.</p>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Payslips</h3>
+        {mine.length === 0 ? (
+          <p style={{ fontSize: 13, color: "#a39c86" }}>No payslips have been generated for you yet. They appear here once payroll is run for a month.</p>
+        ) : (
+          <>
+            <div className="flex items-end gap-3 flex-wrap">
+              <Field label="Choose month">
+                <select value={chosen ? chosen.id : ""} onChange={(e) => setChosenId(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
+                  {mine.map((p) => <option key={p.id} value={p.id}>{PAYROLL_MONTHS[p.month - 1]} {p.year}</option>)}
+                </select>
+              </Field>
+              <button onClick={() => download(chosen)} className="focus-ring flex items-center gap-1.5" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}><Download size={14} /> Download</button>
+            </div>
+            <p style={{ fontSize: 11.5, color: "#7A7568", marginTop: 10 }}>Download opens the payslip ready to save as a PDF or print.</p>
+            <div style={{ marginTop: 14, borderTop: `1px solid ${LINE}` }}>
+              {mine.map((p) => (
+                <div key={p.id} className="flex items-center justify-between" style={{ padding: "9px 2px", borderBottom: `1px solid ${LINE}`, fontSize: 13 }}>
+                  <span style={{ fontWeight: 600 }}>{PAYROLL_MONTHS[p.month - 1]} {p.year}</span>
+                  <span style={{ fontFamily: MONO_FONT, color: "#6b6656" }}>Net {fmtKES(p.netPay)}</span>
+                  <button onClick={() => download(p)} className="focus-ring" title="Download" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 7, padding: "4px 9px", cursor: "pointer", color: "#5b5747" }}><Download size={13} /></button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function EventsView({ events, addEvent, deleteEvent, isAdmin, showToast }) {
