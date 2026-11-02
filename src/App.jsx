@@ -1058,6 +1058,7 @@ export default function App() {
   const [libraryBooks, setLibraryBooks] = useState([]);
   const [bookIssues, setBookIssues] = useState([]);
   const [leaveRequests, setLeaveRequests] = useState([]);
+  const [staffDocuments, setStaffDocuments] = useState([]);
   const [view, setView] = useState("dashboard");
   const [attendanceLanding, setAttendanceLanding] = useState("students");
   const [toast, setToast] = useState(null);
@@ -1089,7 +1090,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1103,6 +1104,7 @@ export default function App() {
         fetchLibraryBooks(token).catch(() => []),
         fetchBookIssues(token).catch(() => []),
         fetchLeaveRequests(token).catch(() => []),
+        fetchStaffDocuments(token).catch(() => []),
       ]);
       setStudents(school.students);
       setGrades(school.grades);
@@ -1118,6 +1120,7 @@ export default function App() {
       setLibraryBooks(libraryBookRows);
       setBookIssues(bookIssueRows);
       setLeaveRequests(leaveRows);
+      setStaffDocuments(staffDocRows);
       setStaff(staffRows);
       setClasses(classNames.length ? classNames : FALLBACK_CLASSES);
       setSubjects(subjectNames.length ? subjectNames : FALLBACK_SUBJECTS);
@@ -1422,6 +1425,23 @@ export default function App() {
     setPayslips((prev) => [slip, ...prev.filter((p) => !(p.staffId === slip.staffId && p.month === month && p.year === year))]);
     return slip;
   };
+  const addStaffDocument = async ({ file, title, description, audience, recipientId }) => {
+    const filePath = await uploadStaffDocumentFile(authedUser.accessToken, file);
+    try {
+      const row = await addStaffDocumentRow(authedUser.accessToken, { title, description, filePath, fileName: file.name, audience, recipientId }, authedUser.id);
+      setStaffDocuments((prev) => [row, ...prev]);
+    } catch (err) {
+      // Don't leave an orphan file behind if the record couldn't be saved.
+      await fetch(`${SUPABASE_URL}/storage/v1/object/staff-documents/${filePath}`, { method: "DELETE", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${authedUser.accessToken}` } }).catch(() => {});
+      throw err;
+    }
+  };
+  const deleteStaffDocument = async (doc) => {
+    await pgFetch(`staff_documents?id=eq.${doc.id}`, authedUser.accessToken, { method: "DELETE", prefer: "return=minimal" });
+    await fetch(`${SUPABASE_URL}/storage/v1/object/staff-documents/${doc.filePath}`, { method: "DELETE", headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${authedUser.accessToken}` } }).catch(() => {});
+    setStaffDocuments((prev) => prev.filter((d) => d.id !== doc.id));
+  };
+  const openStaffDocument = (doc) => downloadStaffDocumentFile(authedUser.accessToken, doc);
   const addLeave = async (leave) => {
     const row = await addLeaveRow(authedUser.accessToken, leave, authedUser.id);
     setLeaveRequests((prev) => [row, ...prev]);
@@ -1814,6 +1834,7 @@ export default function App() {
     addTimetableAssignment, removeTimetableAssignment, updateTimetableSettings, generateTimetable, clearTimetable, setTimetableCell,
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
     leaveRequests, addLeave, decideLeave, deleteLeave,
+    staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
@@ -5391,7 +5412,7 @@ function buildPayslipHtml({ staff, pay, slip, schoolSettings }) {
 
 // Each employee's own documents. Payslips for now (pick a month, download);
 // more attachment types can be added as further sections later.
-function AttachmentsView({ authedUser, staff, payslips, staffPayroll, schoolSettings, showToast }) {
+function AttachmentsView({ authedUser, staff, payslips, staffPayroll, schoolSettings, showToast, isAdmin, staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument }) {
   const me = staff.find((s) => s.id === authedUser.id) || { id: authedUser.id, name: authedUser.name, role: authedUser.role };
   const myPay = staffPayroll.find((p) => p.staffId === authedUser.id);
   const mine = payslips
@@ -5399,6 +5420,49 @@ function AttachmentsView({ authedUser, staff, payslips, staffPayroll, schoolSett
     .sort((a, b) => b.year - a.year || b.month - a.month);
   const [chosenId, setChosenId] = useState("");
   const chosen = mine.find((p) => String(p.id) === String(chosenId)) || mine[0];
+
+  // Documents the school has attached for this person.
+  const forMe = (staffDocuments || []).filter((d) => d.recipientId === authedUser.id || d.audience === "all_staff" || (d.audience === "all_teachers" && TEACHING_ROLES.includes(authedUser.role)));
+  const [docForm, setDocForm] = useState({ audience: "all_teachers", recipientId: "", title: "", description: "" });
+  const [docFile, setDocFile] = useState(null);
+  const [fileKey, setFileKey] = useState(0);
+  const [uploading, setUploading] = useState(false);
+  const setD = (k) => (e) => setDocForm((f) => ({ ...f, [k]: e.target.value }));
+  const audienceLabel = (d) => d.audience === "all_staff" ? "All staff" : d.audience === "all_teachers" ? "All teachers" : (staff.find((x) => x.id === d.recipientId)?.name || "A staff member");
+  const openDoc = async (d) => { try { await openStaffDocument(d); } catch (err) { showToast(err.message || "Couldn't open the document"); } };
+
+  const attach = async (e) => {
+    e.preventDefault();
+    if (!docFile) { showToast("Choose a PDF to attach"); return; }
+    if (docFile.type !== "application/pdf" && !docFile.name.toLowerCase().endsWith(".pdf")) { showToast("Only PDF files can be attached"); return; }
+    if (docFile.size > 10 * 1024 * 1024) { showToast("That file is over 10 MB"); return; }
+    if (docForm.audience === "person" && !docForm.recipientId) { showToast("Choose which staff member it is for"); return; }
+    const title = docForm.title.trim() || docFile.name.replace(/\.pdf$/i, "");
+    setUploading(true);
+    try {
+      await addStaffDocument({ file: docFile, title, description: docForm.description.trim(), audience: docForm.audience, recipientId: docForm.recipientId });
+      showToast("Document attached");
+      setDocForm((f) => ({ ...f, title: "", description: "" }));
+      setDocFile(null); setFileKey((k) => k + 1);
+    } catch (err) {
+      showToast(err.message || "Couldn't attach the document");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const DocRow = ({ d, canDelete }) => (
+    <div className="flex items-center justify-between gap-3" style={{ padding: "9px 2px", borderBottom: `1px solid ${LINE}`, fontSize: 13 }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontWeight: 600 }}>{d.title}</div>
+        <div style={{ fontSize: 11.5, color: "#6b6656" }}>{canDelete ? `For: ${audienceLabel(d)} · ` : ""}{String(d.createdAt || "").slice(0, 10)}{d.description ? ` · ${d.description}` : ""}</div>
+      </div>
+      <div className="flex items-center gap-1.5" style={{ flexShrink: 0 }}>
+        <button onClick={() => openDoc(d)} className="focus-ring" title="Download" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 7, padding: "4px 9px", cursor: "pointer", color: "#5b5747" }}><Download size={13} /></button>
+        {canDelete && <button onClick={() => { if (window.confirm(`Remove "${d.title}"?`)) deleteStaffDocument(d).catch((err) => showToast(err.message || "Couldn't remove it")); }} className="focus-ring" title="Remove" style={{ background: "none", border: "none", color: "#a1442c", cursor: "pointer" }}><Trash2 size={14} /></button>}
+      </div>
+    </div>
+  );
 
   const download = (slip) => {
     if (!slip) return;
@@ -5437,6 +5501,52 @@ function AttachmentsView({ authedUser, staff, payslips, staffPayroll, schoolSett
           </>
         )}
       </div>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 10 }}>Documents from the school</h3>
+        {forMe.length === 0
+          ? <p style={{ fontSize: 13, color: "#a39c86" }}>Nothing has been attached for you yet.</p>
+          : forMe.map((d) => <DocRow key={d.id} d={d} canDelete={false} />)}
+      </div>
+
+      {isAdmin && (
+        <>
+          <form onSubmit={attach} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+            <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>Attach a document for staff</h3>
+            <div className="flex items-end gap-3 flex-wrap">
+              <Field label="Send to">
+                <select value={docForm.audience} onChange={setD("audience")} className="focus-ring" style={{ ...inputStyle, width: 170 }}>
+                  <option value="all_teachers">All teachers</option>
+                  <option value="all_staff">All staff</option>
+                  <option value="person">A specific person</option>
+                </select>
+              </Field>
+              {docForm.audience === "person" && (
+                <Field label="Staff member">
+                  <select value={docForm.recipientId} onChange={setD("recipientId")} className="focus-ring" style={{ ...inputStyle, width: 220 }}>
+                    <option value="">Select…</option>
+                    {staff.map((x) => <option key={x.id} value={x.id}>{x.name} ({x.role})</option>)}
+                  </select>
+                </Field>
+              )}
+              <Field label="Title"><input value={docForm.title} onChange={setD("title")} placeholder="e.g. Staff handbook" className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
+              <Field label="Note (optional)"><input value={docForm.description} onChange={setD("description")} className="focus-ring" style={{ ...inputStyle, width: 200 }} /></Field>
+            </div>
+            <div className="flex items-center gap-3 mt-3 flex-wrap">
+              <input key={fileKey} type="file" accept="application/pdf,.pdf" onChange={(e) => setDocFile(e.target.files?.[0] || null)} style={{ fontSize: 12.5 }} />
+              <button type="submit" disabled={uploading} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: uploading ? "wait" : "pointer" }}>{uploading ? "Attaching…" : "Attach"}</button>
+              <span style={{ fontSize: 11.5, color: "#7A7568" }}>PDF only, up to 10 MB.</span>
+            </div>
+          </form>
+
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
+            <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 10 }}>Documents you've attached</h3>
+            {(staffDocuments || []).length === 0
+              ? <p style={{ fontSize: 13, color: "#a39c86" }}>No documents attached yet.</p>
+              : (staffDocuments || []).map((d) => <DocRow key={d.id} d={d} canDelete />)}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -7733,6 +7843,52 @@ async function decideLeaveRow(token, id, status, decidedBy) {
 }
 async function deleteLeaveRow(token, id) {
   await pgFetch(`leave_requests?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
+}
+
+// Documents (PDFs) that Admin / Head Teacher / Deputy attach for staff.
+// Files sit in a private bucket and are fetched with the user's own token.
+function mapStaffDocRow(r) {
+  return { id: r.id, title: r.title, description: r.description || "", filePath: r.file_path, fileName: r.file_name, audience: r.audience, recipientId: r.recipient_id, uploadedBy: r.uploaded_by, createdAt: r.created_at };
+}
+async function fetchStaffDocuments(token) {
+  const rows = await pgFetch("staff_documents?select=*&order=created_at.desc", token);
+  return rows.map(mapStaffDocRow);
+}
+async function uploadStaffDocumentFile(token, file) {
+  const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+  const path = `${Date.now()}-${safeName}`;
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/staff-documents/${path}`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/pdf" },
+    body: file,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || "Couldn't upload the file. Has the staff-documents setup (SQL) been run in Supabase?");
+  }
+  return path;
+}
+async function addStaffDocumentRow(token, doc, uploadedBy) {
+  const [row] = await pgFetch("staff_documents", token, {
+    method: "POST",
+    body: { title: doc.title, description: doc.description || null, file_path: doc.filePath, file_name: doc.fileName, audience: doc.audience, recipient_id: doc.audience === "person" ? doc.recipientId : null, uploaded_by: uploadedBy },
+  });
+  return mapStaffDocRow(row);
+}
+async function downloadStaffDocumentFile(token, doc) {
+  const res = await fetch(`${SUPABASE_URL}/storage/v1/object/authenticated/staff-documents/${doc.filePath}`, {
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error("Couldn't open that document.");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = doc.fileName || "document.pdf";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 // The dates a leave covers, counted by the leave type's own rule (Mon–Fri
