@@ -339,3 +339,30 @@ CREATE POLICY "payslips_staff_read_own" ON public.payslips
 CREATE POLICY "staff_payroll_read_own" ON public.staff_payroll
   FOR SELECT
   USING (staff_id = auth.uid());
+
+-- (staff document attachments: see staff-documents-migration.sql)
+
+-- M-Pesa Till payments: transactions imported from a statement (or, later,
+-- received from Daraja) that the cashier searches and allocates to a student.
+CREATE TABLE IF NOT EXISTS public.mpesa_transactions (
+  id uuid primary key default gen_random_uuid(),
+  receipt_code text not null unique,
+  amount numeric not null,
+  transaction_time timestamptz,
+  sender_name text,
+  sender_phone text,
+  details text,
+  source text not null default 'import',
+  status text not null default 'Unallocated',
+  student_id integer references public.students(id) on delete set null,
+  batch_id text,
+  allocated_by uuid references public.staff_profiles(id),
+  allocated_at timestamptz,
+  created_by uuid references public.staff_profiles(id),
+  created_at timestamptz not null default now()
+);
+CREATE INDEX IF NOT EXISTS mpesa_transactions_time_idx ON public.mpesa_transactions (transaction_time desc);
+ALTER TABLE public.mpesa_transactions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "mpesa_transactions_admin_clerk" ON public.mpesa_transactions FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
