@@ -1059,6 +1059,7 @@ export default function App() {
   const [bookIssues, setBookIssues] = useState([]);
   const [leaveRequests, setLeaveRequests] = useState([]);
   const [staffDocuments, setStaffDocuments] = useState([]);
+  const [mpesaTransactions, setMpesaTransactions] = useState([]);
   const [view, setView] = useState("dashboard");
   const [attendanceLanding, setAttendanceLanding] = useState("students");
   const [toast, setToast] = useState(null);
@@ -1090,7 +1091,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows, mpesaRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1105,6 +1106,7 @@ export default function App() {
         fetchBookIssues(token).catch(() => []),
         fetchLeaveRequests(token).catch(() => []),
         fetchStaffDocuments(token).catch(() => []),
+        fetchMpesaTransactions(token).catch(() => []),
       ]);
       setStudents(school.students);
       setGrades(school.grades);
@@ -1121,6 +1123,7 @@ export default function App() {
       setBookIssues(bookIssueRows);
       setLeaveRequests(leaveRows);
       setStaffDocuments(staffDocRows);
+      setMpesaTransactions(mpesaRows);
       setStaff(staffRows);
       setClasses(classNames.length ? classNames : FALLBACK_CLASSES);
       setSubjects(subjectNames.length ? subjectNames : FALLBACK_SUBJECTS);
@@ -1424,6 +1427,20 @@ export default function App() {
     };
     setPayslips((prev) => [slip, ...prev.filter((p) => !(p.staffId === slip.staffId && p.month === month && p.year === year))]);
     return slip;
+  };
+  // M-Pesa Till payments
+  const importMpesaTransactions = async (rows) => {
+    const added = await insertMpesaRows(authedUser.accessToken, rows, authedUser.id);
+    if (added.length) setMpesaTransactions((prev) => [...added, ...prev].sort((a, b) => String(b.time || "").localeCompare(String(a.time || ""))));
+    return added.length;
+  };
+  const allocateMpesa = async (id, studentId, batchId) => {
+    const row = await patchMpesaRow(authedUser.accessToken, id, { status: "Allocated", student_id: studentId, batch_id: batchId, allocated_by: authedUser.id, allocated_at: new Date().toISOString() });
+    setMpesaTransactions((prev) => prev.map((t) => (t.id === id ? row : t)));
+  };
+  const setMpesaIgnored = async (id, ignored) => {
+    const row = await patchMpesaRow(authedUser.accessToken, id, { status: ignored ? "Ignored" : "Unallocated" });
+    setMpesaTransactions((prev) => prev.map((t) => (t.id === id ? row : t)));
   };
   const addStaffDocument = async ({ file, title, description, audience, recipientId }) => {
     const filePath = await uploadStaffDocumentFile(authedUser.accessToken, file);
@@ -1835,6 +1852,7 @@ export default function App() {
     staffPayroll, payrollSettings, payslips, saveStaffPayroll, updatePayrollSettings, generatePayslip, deletePayslip,
     leaveRequests, addLeave, decideLeave, deleteLeave,
     staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument,
+    mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
@@ -3615,8 +3633,8 @@ function GradesView({ students, classes, exams, fetchClassMarksForExam, classGra
  * ---------------------------------------------------------------------- */
 function FeesView(ctx) {
   const [tab, setTab] = useState("fees");
-  const tabs = ["fees", "other", "accounts", "expenditure"];
-  const labels = { fees: "School Fees", other: "Other Payments", accounts: "Accounts", expenditure: "Expenditure" };
+  const tabs = ["fees", "other", "mpesa", "accounts", "expenditure"];
+  const labels = { fees: "School Fees", other: "Other Payments", mpesa: "M-Pesa", accounts: "Accounts", expenditure: "Expenditure" };
   return (
     <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
       <div className="flex items-center justify-between mb-5">
@@ -3633,6 +3651,7 @@ function FeesView(ctx) {
       {tab === "fees" && <SchoolFeesTab {...ctx} />}
       {tab === "other" && <OtherPaymentsTab {...ctx} />}
       {tab === "accounts" && <AccountsOverviewTab {...ctx} />}
+      {tab === "mpesa" && <MpesaTab {...ctx} />}
       {tab === "expenditure" && <ExpenditureTab {...ctx} />}
     </div>
   );
@@ -3886,6 +3905,296 @@ function AccountsOverviewTab({ payments, expenditures, accountLoans }) {
 
 // Recording an expense and choosing which account it's drawn from —
 // what makes the accounts above show a real balance instead of just totals.
+/* ---------------------------------------------------------------------- *
+ *  M-PESA TILL PAYMENTS — transactions are imported from the Till
+ *  statement (CSV) or added by hand, then the cashier searches by M-Pesa
+ *  code / name / phone / amount and allocates a payment to a student,
+ *  which records the fee payment and prints the usual receipt.
+ * ---------------------------------------------------------------------- */
+function mapMpesaRow(r) {
+  return { id: r.id, code: r.receipt_code, amount: Number(r.amount) || 0, time: r.transaction_time, senderName: r.sender_name || "", senderPhone: r.sender_phone || "", details: r.details || "", source: r.source, status: r.status, studentId: r.student_id ?? null, batchId: r.batch_id || null, allocatedAt: r.allocated_at };
+}
+async function fetchMpesaTransactions(token) {
+  const rows = await pgFetch("mpesa_transactions?select=*&order=transaction_time.desc.nullslast,created_at.desc&limit=2000", token);
+  return rows.map(mapMpesaRow);
+}
+// Already-imported codes are skipped (unique receipt code), so re-importing
+// an overlapping statement is safe.
+async function insertMpesaRows(token, rows, createdBy) {
+  const body = rows.map((r) => ({ receipt_code: r.code, amount: r.amount, transaction_time: r.time || null, sender_name: r.senderName || null, sender_phone: r.senderPhone || null, details: r.details || null, source: r.source || "import", created_by: createdBy }));
+  const inserted = await pgFetch("mpesa_transactions?on_conflict=receipt_code", token, { method: "POST", body, prefer: "resolution=ignore-duplicates,return=representation" });
+  return (inserted || []).map(mapMpesaRow);
+}
+async function patchMpesaRow(token, id, body) {
+  const [row] = await pgFetch(`mpesa_transactions?id=eq.${id}`, token, { method: "PATCH", body });
+  return mapMpesaRow(row);
+}
+
+// --- statement parsing -------------------------------------------------
+function parseCsvText(text) {
+  const rows = [];
+  let row = [], cell = "", inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') inQ = false;
+      else cell += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); cell = "";
+      if (row.some((x) => x.trim() !== "")) rows.push(row);
+      row = [];
+    } else cell += c;
+  }
+  row.push(cell);
+  if (row.some((x) => x.trim() !== "")) rows.push(row);
+  return rows;
+}
+// Statement times are Kenyan local time; dd-mm-yyyy or yyyy-mm-dd.
+function parseMpesaTime(raw) {
+  const t = String(raw || "").trim();
+  if (!t) return null;
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T]?(\d{1,2})?:?(\d{2})?:?(\d{2})?/);
+  let y, mo, d, hh = "00", mi = "00", ss = "00";
+  if (m) { [, y, mo, d] = m; hh = m[4] || "00"; mi = m[5] || "00"; ss = m[6] || "00"; }
+  else {
+    m = t.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})[ T]?(\d{1,2})?:?(\d{2})?:?(\d{2})?/);
+    if (!m) return null;
+    [, d, mo, y] = m; hh = m[4] || "00"; mi = m[5] || "00"; ss = m[6] || "00";
+  }
+  const p = (v) => String(v).padStart(2, "0");
+  return `${y}-${p(mo)}-${p(d)}T${p(hh)}:${p(mi)}:${p(ss)}+03:00`;
+}
+function parseMpesaStatement(text) {
+  const grid = parseCsvText(text.replace(/^\uFEFF/, ""));
+  const hi = grid.findIndex((r) => r.some((c) => /receipt|trans(action)?\s*id/i.test(c)));
+  if (hi < 0) return { rows: [], skipped: 0, error: "Couldn't find a receipt / transaction ID column. Export the Till statement as CSV and try again." };
+  const header = grid[hi].map((c) => c.trim());
+  const find = (re) => header.findIndex((h) => re.test(h));
+  const ix = {
+    code: find(/receipt|trans(action)?\s*id/i), time: find(/completion|trans.*time|^time|date/i), amount: find(/paid\s*in|amount|credit/i),
+    details: find(/detail|description|narrat/i), status: find(/status/i), name: find(/^(sender|customer|name|first\s*name)/i), phone: find(/msisdn|phone|mobile|^from/i),
+  };
+  if (ix.amount < 0) return { rows: [], skipped: 0, error: "Couldn't find an amount (Paid In) column in that file." };
+  const out = [];
+  let skipped = 0;
+  grid.slice(hi + 1).forEach((r) => {
+    const code = (r[ix.code] || "").trim();
+    const amount = parseFloat(String(r[ix.amount] || "").replace(/[^0-9.\-]/g, ""));
+    const status = ix.status >= 0 ? (r[ix.status] || "").trim() : "";
+    if (!code || !(amount > 0) || (status && !/complet|success/i.test(status))) { skipped++; return; }
+    const details = ix.details >= 0 ? (r[ix.details] || "").trim() : "";
+    let phone = ix.phone >= 0 ? (r[ix.phone] || "").trim() : "";
+    let name = ix.name >= 0 ? (r[ix.name] || "").trim() : "";
+    if (!phone) {
+      const pm = details.match(/(254\d{8,9}|07\d{8}|01\d{8}|\d{3,4}\*+\d{2,4}|[0-9a-fA-F]{64})/);
+      if (pm) phone = pm[1];
+    }
+    if (!name && details) {
+      name = details.replace(phone, "").replace(/(customer\s+)?payment\s+(received\s+)?from|received\s+from|^from|-/gi, " ").replace(/\s+/g, " ").trim();
+    }
+    out.push({ code: code.toUpperCase(), amount, time: parseMpesaTime(ix.time >= 0 ? r[ix.time] : ""), senderName: name, senderPhone: phone, details, source: "import" });
+  });
+  return { rows: out, skipped };
+}
+
+// --- phone search (Safaricom may hide or hash the sender's number) -----
+function normalizeKenyanPhone(q) {
+  const d = String(q || "").replace(/\D/g, "");
+  if (d.length < 9) return "";
+  return `254${d.slice(-9)}`;
+}
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function phoneMatches(stored, normalized, hash) {
+  const s = String(stored || "").trim();
+  if (!s || !normalized) return false;
+  if (/^[0-9a-fA-F]{64}$/.test(s)) return !!hash && s.toLowerCase() === hash;
+  if (s.includes("*")) {
+    const pattern = s.replace(/[^0-9*]/g, "").replace(/\*+/g, "\\d*");
+    try { return new RegExp(`^${pattern}$`).test(normalized); } catch { return false; }
+  }
+  return s.replace(/\D/g, "").endsWith(normalized.slice(-9));
+}
+
+function MpesaTab({ students, payments, feeStructure, otherFeeStructure, schoolSettings, mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored, recordPaymentBatch, showToast }) {
+  const [q, setQ] = useState("");
+  const [qHash, setQHash] = useState("");
+  const [statusFilter, setStatusFilter] = useState("Unallocated");
+  const [preview, setPreview] = useState(null); // { rows, skipped, error }
+  const [importing, setImporting] = useState(false);
+  const [fileKey, setFileKey] = useState(0);
+  const [allocating, setAllocating] = useState(null); // transaction being allocated
+  const [pickStudent, setPickStudent] = useState(null);
+  const [studentQ, setStudentQ] = useState("");
+  const [manual, setManual] = useState({ code: "", amount: "", name: "", phone: "", date: new Date().toISOString().slice(0, 10) });
+
+  const normalized = normalizeKenyanPhone(q);
+  useEffect(() => {
+    let live = true;
+    if (normalized && /^[\d\s+()-]+$/.test(q.trim())) sha256Hex(normalized).then((h) => { if (live) setQHash(h); });
+    else setQHash("");
+    return () => { live = false; };
+  }, [normalized, q]);
+
+  const onFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPreview(parseMpesaStatement(await file.text()));
+  };
+  const confirmImport = async () => {
+    setImporting(true);
+    try {
+      const added = await importMpesaTransactions(preview.rows);
+      showToast(`Imported ${added} new payment${added === 1 ? "" : "s"}${preview.rows.length - added > 0 ? ` (${preview.rows.length - added} already imported)` : ""}`);
+      setPreview(null); setFileKey((k) => k + 1);
+    } catch (err) {
+      showToast(err.message || "Couldn't import the statement");
+    } finally {
+      setImporting(false);
+    }
+  };
+  const addManual = async (e) => {
+    e.preventDefault();
+    const amount = Number(manual.amount);
+    if (!manual.code.trim() || !(amount > 0)) { showToast("Enter the M-Pesa code and amount"); return; }
+    try {
+      const added = await importMpesaTransactions([{ code: manual.code.trim().toUpperCase(), amount, time: parseMpesaTime(manual.date), senderName: manual.name.trim(), senderPhone: manual.phone.trim(), details: "Added manually", source: "manual" }]);
+      showToast(added ? "Payment added" : "That M-Pesa code is already recorded");
+      if (added) setManual((m) => ({ ...m, code: "", amount: "", name: "", phone: "" }));
+    } catch (err) { showToast(err.message || "Couldn't add the payment"); }
+  };
+
+  const ql = q.trim().toLowerCase();
+  const shown = mpesaTransactions.filter((t) => {
+    if (statusFilter !== "All" && t.status !== statusFilter) return false;
+    if (!ql) return true;
+    return t.code.toLowerCase().includes(ql) || t.senderName.toLowerCase().includes(ql) || t.details.toLowerCase().includes(ql)
+      || String(t.amount) === ql.replace(/,/g, "") || phoneMatches(t.senderPhone, normalized, qHash);
+  });
+  const studentName = (id) => students.find((s) => s.id === id)?.name || "—";
+  const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+  const studentMatches = students.filter((s) => { const x = studentQ.trim().toLowerCase(); return !x || s.name.toLowerCase().includes(x) || String(s.admissionNo || "").toLowerCase().includes(x); }).slice(0, 8);
+
+  const dueFor = (student) => (acct) => (acct === "School Fees" ? (feeStructure[student.class] || 0) : (otherFeeStructure[acct]?.[student.class] || 0));
+  const paidFor = (student) => (acct) => payments.filter((p) => p.studentId === student.id && p.account === acct).reduce((s, p) => s + p.amount, 0);
+
+  const finishAllocation = async ({ date, entries }) => {
+    const tx = allocating, student = pickStudent;
+    try {
+      const saved = await recordPaymentBatch(student.id, { date, method: "M-Pesa", entries });
+      await allocateMpesa(tx.id, student.id, saved[0].batchId);
+      showToast(`Allocated ${money(tx.amount)} to ${student.name}`);
+      const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
+      const paidAfter = (acct) => paidFor(student)(acct) + (entryAmount[acct] || 0);
+      printDocument(`${student.name} Receipt`, buildReceiptHtml({ schoolSettings, student, payments: saved, date, method: `M-Pesa ${tx.code}`, receiptId: saved[0].id, dueForAccount: dueFor(student), paidToDateForAccount: paidAfter }), "A5");
+      setAllocating(null); setPickStudent(null); setStudentQ("");
+    } catch (err) {
+      showToast(err.message || "Couldn't allocate the payment");
+    }
+  };
+
+  const chip = (label) => (
+    <button key={label} onClick={() => setStatusFilter(label)} className="focus-ring" style={{ padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, border: `1px solid ${statusFilter === label ? "transparent" : LINE}`, background: statusFilter === label ? RAIL : PANEL, color: statusFilter === label ? "#fff" : "#5b5747", cursor: "pointer" }}>{label}</button>
+  );
+
+  return (
+    <div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 6 }}>Import Till statement</h3>
+        <p style={{ fontSize: 12, color: "#7A7568", marginBottom: 10 }}>Download the Till statement from the M-Pesa business portal as a CSV file and upload it here. Payments already imported are skipped, so overlapping statements are safe.</p>
+        <input key={fileKey} type="file" accept=".csv,text/csv" onChange={onFile} style={{ fontSize: 12.5 }} />
+        {preview?.error && <p style={{ fontSize: 12.5, color: "#a1442c", marginTop: 8 }}>{preview.error}</p>}
+        {preview && !preview.error && (
+          <div className="flex items-center gap-3 flex-wrap" style={{ marginTop: 10, fontSize: 13 }}>
+            <span><b>{preview.rows.length}</b> payment{preview.rows.length === 1 ? "" : "s"} found{preview.skipped ? ` · ${preview.skipped} other row${preview.skipped === 1 ? "" : "s"} skipped (not payments received)` : ""} · total <b>{money(preview.rows.reduce((s, r) => s + r.amount, 0))}</b></span>
+            <button onClick={confirmImport} disabled={importing || !preview.rows.length} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: importing ? "wait" : "pointer" }}>{importing ? "Importing…" : "Import"}</button>
+            <button onClick={() => { setPreview(null); setFileKey((k) => k + 1); }} className="focus-ring" style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 12.5, cursor: "pointer" }}>Cancel</button>
+          </div>
+        )}
+        <form onSubmit={addManual} className="flex items-end gap-2 flex-wrap" style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
+          <Field label="Or add one by hand — M-Pesa code"><input value={manual.code} onChange={(e) => setManual((m) => ({ ...m, code: e.target.value }))} placeholder="e.g. SGH7K2ABCD" className="focus-ring" style={{ ...inputStyle, width: 170 }} /></Field>
+          <Field label="Amount"><input type="number" min={1} value={manual.amount} onChange={(e) => setManual((m) => ({ ...m, amount: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 110 }} /></Field>
+          <Field label="Sender name"><input value={manual.name} onChange={(e) => setManual((m) => ({ ...m, name: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 160 }} /></Field>
+          <Field label="Phone (optional)"><input value={manual.phone} onChange={(e) => setManual((m) => ({ ...m, phone: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 140 }} /></Field>
+          <Field label="Date"><input type="date" value={manual.date} onChange={(e) => setManual((m) => ({ ...m, date: e.target.value }))} className="focus-ring" style={{ ...inputStyle, width: 145 }} /></Field>
+          <button type="submit" className="focus-ring" style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Add</button>
+        </form>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap mb-3">
+        <div style={{ position: "relative" }}>
+          <Search size={14} style={{ position: "absolute", left: 10, top: 11, color: "#a39c86" }} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search M-Pesa code, phone, name or amount" className="focus-ring" style={{ ...inputStyle, width: 340, paddingLeft: 30 }} />
+        </div>
+        <div className="flex gap-1.5">{["Unallocated", "Allocated", "Ignored", "All"].map(chip)}</div>
+        <span style={{ fontSize: 12, color: "#7A7568", marginLeft: "auto" }}>{shown.length} payment{shown.length === 1 ? "" : "s"}</span>
+      </div>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 0.8fr 1.5fr 1fr 1.2fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#8a8474", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: `1px solid ${LINE}` }}>
+          <span>Time</span><span>M-Pesa code</span><span>Amount</span><span>Sender</span><span>Status</span><span></span>
+        </div>
+        {shown.map((t) => (
+          <div key={t.id} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 0.8fr 1.5fr 1fr 1.2fr", padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}`, alignItems: "center" }}>
+            <span style={{ fontSize: 12 }}>{fmtTime(t.time)}</span>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12, fontWeight: 700 }}>{t.code}</span>
+            <span style={{ fontFamily: MONO_FONT, fontWeight: 700 }}>{money(t.amount)}</span>
+            <span style={{ fontSize: 12 }}>{t.senderName || "—"}{t.senderPhone ? <span style={{ display: "block", color: "#6b6656", fontFamily: MONO_FONT, fontSize: 11, wordBreak: "break-all" }}>{t.senderPhone.length > 20 ? `${t.senderPhone.slice(0, 10)}…` : t.senderPhone}</span> : null}</span>
+            <span style={{ fontSize: 12 }}>{t.status === "Allocated" ? <span style={{ color: "#2F6F4A", fontWeight: 700 }}>Allocated<span style={{ display: "block", fontWeight: 400, color: "#6b6656" }}>{studentName(t.studentId)}</span></span> : <span style={{ color: t.status === "Ignored" ? "#a39c86" : "#A1702C", fontWeight: 700 }}>{t.status}</span>}</span>
+            <div className="flex gap-1.5 justify-end">
+              {t.status === "Unallocated" && (
+                <>
+                  <button onClick={() => { setAllocating(t); setPickStudent(null); setStudentQ(""); }} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: "none", background: ACCENT, color: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Allocate</button>
+                  <button onClick={() => setMpesaIgnored(t.id, true).catch((err) => showToast(err.message || "Couldn't update"))} className="focus-ring" title="Not a fee payment" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>Ignore</button>
+                </>
+              )}
+              {t.status === "Ignored" && <button onClick={() => setMpesaIgnored(t.id, false).catch((err) => showToast(err.message || "Couldn't update"))} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>Restore</button>}
+            </div>
+          </div>
+        ))}
+        {shown.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>{mpesaTransactions.length === 0 ? "No M-Pesa payments yet — import your Till statement above." : "No payments match."}</div>}
+      </div>
+
+      {allocating && !pickStudent && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(20,24,20,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40 }} onClick={() => setAllocating(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: PANEL, borderRadius: 16, width: 420, maxHeight: "86vh", overflowY: "auto", padding: 24 }}>
+            <div className="flex items-center justify-between mb-1">
+              <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 17, fontWeight: 600 }}>Whose payment is this?</h3>
+              <button onClick={() => setAllocating(null)} className="focus-ring" style={{ background: "none", border: "none", cursor: "pointer", color: "#9a9484" }}><X size={18} /></button>
+            </div>
+            <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 12 }}>{allocating.code} · <b>{money(allocating.amount)}</b>{allocating.senderName ? ` · from ${allocating.senderName}` : ""}</p>
+            <input autoFocus value={studentQ} onChange={(e) => setStudentQ(e.target.value)} placeholder="Search student name or admission no." className="focus-ring" style={{ ...inputStyle, marginBottom: 8 }} />
+            {studentMatches.map((s) => (
+              <button key={s.id} onClick={() => setPickStudent(s)} className="focus-ring" style={{ display: "block", width: "100%", textAlign: "left", padding: "9px 10px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", marginBottom: 6, cursor: "pointer", fontSize: 13 }}>
+                <b>{s.name}</b> <span style={{ color: "#6b6656" }}>· {s.class}{s.admissionNo ? ` · ${s.admissionNo}` : ""}</span>
+              </button>
+            ))}
+            {studentMatches.length === 0 && <p style={{ fontSize: 12.5, color: "#a39c86" }}>No matching students.</p>}
+          </div>
+        </div>
+      )}
+      {allocating && pickStudent && (
+        <MultiPayModal
+          student={pickStudent}
+          dueForAccount={dueFor(pickStudent)}
+          paidToDateForAccount={paidFor(pickStudent)}
+          lockedTotal={allocating.amount}
+          initialAmounts={{ "School Fees": String(allocating.amount) }}
+          fixedDate={allocating.time ? new Date(allocating.time).toLocaleDateString("en-CA", { timeZone: "Africa/Nairobi" }) : undefined}
+          onClose={() => setPickStudent(null)}
+          onSubmit={finishAllocation}
+        />
+      )}
+    </div>
+  );
+}
+
 function ExpenditureTab({ payments, expenditures, accountLoans, recordExpenditure, deleteExpenditure, recordLoan, repayLoan, showToast }) {
   const [form, setForm] = useState({ account: PAYMENT_ACCOUNTS[0], amount: "", date: new Date().toISOString().slice(0, 10), description: "" });
   const [saving, setSaving] = useState(false);
@@ -4094,10 +4403,10 @@ function PayModal({ student, account = "School Fees", due, paid, onClose, onSubm
 // Record a payment against several fee items at once (e.g. tuition,
 // transport, and food in one transaction) — all items paid in this modal
 // land on the same combined receipt.
-function MultiPayModal({ student, dueForAccount, paidToDateForAccount, onClose, onSubmit }) {
-  const [amounts, setAmounts] = useState({});
+function MultiPayModal({ student, dueForAccount, paidToDateForAccount, onClose, onSubmit, lockedTotal, initialAmounts, fixedDate }) {
+  const [amounts, setAmounts] = useState(initialAmounts || {});
   const [method, setMethod] = useState("M-Pesa");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(fixedDate || new Date().toISOString().slice(0, 10));
   const [busy, setBusy] = useState(false);
 
   const entries = RECEIPT_ITEMS
@@ -4108,6 +4417,7 @@ function MultiPayModal({ student, dueForAccount, paidToDateForAccount, onClose, 
   const submit = async (e) => {
     e.preventDefault();
     if (!entries.length) return;
+    if (lockedTotal != null && total !== lockedTotal) return;
     setBusy(true);
     try {
       await onSubmit({ date, method, entries });
@@ -4160,8 +4470,13 @@ function MultiPayModal({ student, dueForAccount, paidToDateForAccount, onClose, 
         <div className="flex items-center justify-between mb-4" style={{ fontSize: 13.5, fontWeight: 700 }}>
           <span>Total</span><span style={{ fontFamily: MONO_FONT }}>{money(total)}</span>
         </div>
+        {lockedTotal != null && (
+          <p style={{ fontSize: 12, marginTop: -8, marginBottom: 12, color: total === lockedTotal ? "#2F6F4A" : "#a1442c", fontWeight: 600 }}>
+            {total === lockedTotal ? `Matches the M-Pesa payment of ${money(lockedTotal)}.` : `Split the ${money(lockedTotal)} M-Pesa payment across the items — ${money(Math.abs(lockedTotal - total))} ${total < lockedTotal ? "still to allocate" : "too much"}.`}
+          </p>
+        )}
 
-        <button type="submit" disabled={busy || total <= 0} className="focus-ring" style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: busy || total <= 0 ? 0.6 : 1 }}>
+        <button type="submit" disabled={busy || total <= 0 || (lockedTotal != null && total !== lockedTotal)} className="focus-ring" style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: ACCENT, color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", opacity: busy || total <= 0 || (lockedTotal != null && total !== lockedTotal) ? 0.6 : 1 }}>
           {busy ? "Saving…" : "Record & Print Receipt"}
         </button>
       </form>
