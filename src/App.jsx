@@ -18,9 +18,13 @@ import {
  * ---------------------------------------------------------------------- */
 const DEFAULT_TERM = "Term 1"; // fallback only — the real current term is set in School Settings
 const TERMS = ["Term 1", "Term 2", "Term 3"];
+const CURRENT_YEAR = String(new Date().getFullYear());
+// Selectable years: 2025 up to at least 2035 (and always a few years ahead).
 const EXAM_YEARS = (() => {
-  const y = new Date().getFullYear();
-  return [y - 1, y, y + 1].map(String);
+  const last = Math.max(2035, new Date().getFullYear() + 5);
+  const out = [];
+  for (let y = 2025; y <= last; y++) out.push(String(y));
+  return out;
 })();
 const GRADING_SYSTEMS = ["KJSEA-8Level", "KPSEA-4Level"];
 // Used only as a fallback for the first render, before the real lists load
@@ -2670,11 +2674,11 @@ function TeacherDashboard({ authedUser, students, attendance, classes, events, e
       setExamStatus("checking");
       try {
         if (myClass) {
-          const rows = await fetchClassMarksForExam({ studentClass: myClass, term: TERMS[1], year: EXAM_YEARS[1], examName: latestExam });
+          const rows = await fetchClassMarksForExam({ studentClass: myClass, term: TERMS[1], year: CURRENT_YEAR, examName: latestExam });
           if (!cancelled) setExamStatus(rows.length > 0 ? "done" : "pending");
         } else {
           const results = await Promise.all(
-            (classes || []).map((c) => fetchClassMarksForExam({ studentClass: c, term: TERMS[1], year: EXAM_YEARS[1], examName: latestExam }).catch(() => []))
+            (classes || []).map((c) => fetchClassMarksForExam({ studentClass: c, term: TERMS[1], year: CURRENT_YEAR, examName: latestExam }).catch(() => []))
           );
           const mySubjects = authedUser?.subjects || [];
           const anyMine = results.flat().some((r) => mySubjects.includes(r.subject));
@@ -3157,10 +3161,35 @@ function StudentsView(ctx) {
 // Bulk-moves every student in one class into another — the end-of-year
 // promotion workflow (Grade 3 → Grade 4 for everyone at once), rather than
 // editing each student's class individually.
+// Confirms moving one student out of the school, with the date they left.
+function MoveToAlumniModal({ student, onConfirm, onClose }) {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [busy, setBusy] = useState(false);
+  const go = async () => {
+    setBusy(true);
+    try { await onConfirm(date); } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(20,24,20,.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: PANEL, borderRadius: 16, width: 380, padding: 24 }}>
+        <div className="flex items-center justify-between mb-2">
+          <h3 style={{ fontFamily: DISPLAY_FONT, fontSize: 17, fontWeight: 600 }}>Move to Alumni</h3>
+          <button type="button" onClick={onClose} className="focus-ring" style={{ background: "none", border: "none", cursor: "pointer", color: "#9a9484" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: "#4a4536", marginBottom: 12 }}><b>{student.name}</b> ({student.class}) is leaving the school. Their records are kept under Alumni, and they will no longer appear in {student.class}, attendance, exams or billing. Any unpaid fees stay on record, and you can restore them later.</p>
+        <Field label="Date left"><input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="focus-ring" style={inputStyle} /></Field>
+        <button type="button" onClick={go} disabled={busy || !date} className="focus-ring" style={{ width: "100%", marginTop: 16, padding: "10px 0", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer" }}>{busy ? "Moving…" : "Move to Alumni"}</button>
+      </div>
+    </div>
+  );
+}
+
 // Former students. Their records (guardian, contacts, class they left from,
 // fee history) are kept; they just no longer appear in classes, attendance,
 // exams or billing. Any unpaid fees stay visible here.
-function AlumniView({ alumni, classes, feeEnv, restoreAlumnus, showToast }) {
+function AlumniView({ alumni, students, classes, feeEnv, restoreAlumnus, graduateStudents, showToast }) {
+  const [moveQ, setMoveQ] = useState("");
+  const [moving, setMoving] = useState(null);
   const [q, setQ] = useState("");
   const [yearFilter, setYearFilter] = useState("All");
   const [openId, setOpenId] = useState(null);
@@ -3182,6 +3211,28 @@ function AlumniView({ alumni, classes, feeEnv, restoreAlumnus, showToast }) {
     <div className="px-7 py-6" style={{ maxWidth: 1040 }}>
       <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Alumni</h2>
       <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Students who have left the school, with their records kept. Move students here from the Promote Class screen or a student's profile.</p>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>Move a student to Alumni</h3>
+        <p style={{ fontSize: 12, color: "#7A7568", marginBottom: 8 }}>For a student leaving from any class. (To move a whole class, use Promote Class on the Students tab.)</p>
+        <input value={moveQ} onChange={(e) => setMoveQ(e.target.value)} placeholder="Search a current student by name or admission no." className="focus-ring" style={{ ...inputStyle, width: 340 }} />
+        {moveQ.trim() && (
+          <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {students.filter((st) => { const x = moveQ.trim().toLowerCase(); return st.name.toLowerCase().includes(x) || String(st.admissionNo || "").toLowerCase().includes(x); }).slice(0, 8).map((st) => (
+              <button key={st.id} onClick={() => setMoving(st)} className="focus-ring" style={{ padding: "7px 11px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontSize: 12.5, cursor: "pointer" }}><b>{st.name}</b> <span style={{ color: "#6b6656" }}>· {st.class}</span></button>
+            ))}
+          </div>
+        )}
+      </div>
+      {moving && (
+        <MoveToAlumniModal
+          student={moving}
+          onClose={() => setMoving(null)}
+          onConfirm={async (date) => {
+            try { await graduateStudents([moving.id], date); showToast(`${moving.name} moved to Alumni`); setMoving(null); setMoveQ(""); }
+            catch (err) { showToast(err.message || "Couldn't move to Alumni"); }
+          }}
+        />
+      )}
       <div className="flex items-center gap-3 flex-wrap mb-4">
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, admission no. or guardian" className="focus-ring" style={{ ...inputStyle, width: 300 }} />
         <select value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 150 }}>
@@ -3275,6 +3326,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [alumniOpen, setAlumniOpen] = useState(false);
   const myGrades = grades.filter((g) => g.studentId === student.id);
   const avg = myGrades.length ? Math.round(myGrades.reduce((s, g) => s + g.score, 0) / myGrades.length) : 0;
   const myAttendance = attendance.filter((a) => a.studentId === student.id);
@@ -3323,11 +3375,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
                 <button onClick={() => setEditOpen(true)} className="focus-ring flex items-center gap-1" title="Edit student details" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: BG, color: "#5b5747", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
                   <Pencil size={12} /> Edit
                 </button>
-                <button onClick={async () => {
-                  if (!window.confirm(`Move ${student.name} to Alumni? Their records are kept, and they leave ${student.class}, attendance, exams and billing. You can restore them later.`)) return;
-                  try { await graduateStudents([student.id], new Date().toISOString().slice(0, 10)); showToast(`${student.name} moved to Alumni`); onClose(); }
-                  catch (err) { showToast(err.message || "Couldn't move to Alumni"); }
-                }} className="focus-ring flex items-center gap-1" title="Move to Alumni (left school)" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: BG, color: "#5b5747", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+                <button onClick={() => setAlumniOpen(true)} className="focus-ring flex items-center gap-1" title="Move to Alumni (left school)" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: BG, color: "#5b5747", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
                   <GraduationCap size={12} /> Alumni
                 </button>
                 <button onClick={() => setConfirmDelete(true)} className="focus-ring flex items-center gap-1" title="Delete student" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid #F0CFC4`, background: "#FBEDE7", color: "#a1442c", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
@@ -3397,6 +3445,16 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
           )}
         </div>
       </div>
+      {alumniOpen && (
+        <MoveToAlumniModal
+          student={student}
+          onClose={() => setAlumniOpen(false)}
+          onConfirm={async (date) => {
+            try { await graduateStudents([student.id], date); showToast(`${student.name} moved to Alumni`); setAlumniOpen(false); onClose(); }
+            catch (err) { showToast(err.message || "Couldn't move to Alumni"); }
+          }}
+        />
+      )}
       {editOpen && (
         <EditStudentModal
           student={student} classes={classes} uploadPhoto={uploadPhoto}
@@ -4459,7 +4517,7 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
   const [setCurrent, setSetCurrent] = useState(true);
   const [bfEdits, setBfEdits] = useState({});
   const everyone = allStudents || students;
-  const years = [suggested.year - 1, suggested.year, suggested.year + 1];
+  const years = [...new Set([...EXAM_YEARS.map(Number), suggested.year])].sort((a, b) => a - b);
 
   // ---- not started yet ----
   if (!cutover) {
@@ -7041,7 +7099,7 @@ function ComposeSmsTab({ students, classes, staff, otherFeeStructure, feeStructu
 // personalized message per student (via sendBatchSms), not one blast to all.
 function ExamResultsSmsTab({ students, classes, exams, schoolSettings, fetchClassMarksForExam, sendBatchSms, recordSmsMessage, showToast }) {
   const [term, setTerm] = useState(TERMS[1]);
-  const [year, setYear] = useState(EXAM_YEARS[1]);
+  const [year, setYear] = useState(CURRENT_YEAR);
   const [examName, setExamName] = useState(exams[0] || "");
   const [cls, setCls] = useState(classes[0] || "");
   const [loading, setLoading] = useState(false);
@@ -7506,7 +7564,7 @@ function EnterMarksTab({ students, classes, subjects, exams, fetchMarksFor, save
   const [cls, setCls] = useState(lockedClass || classes[0] || "");
   const [subject, setSubject] = useState(subjects[0] || "");
   const [term, setTerm] = useState(TERMS[1]);
-  const [year, setYear] = useState(EXAM_YEARS[1]);
+  const [year, setYear] = useState(CURRENT_YEAR);
   const [examName, setExamName] = useState(exams[0] || "");
   const [outOf, setOutOf] = useState(100);
   const [loaded, setLoaded] = useState(false);
@@ -7840,7 +7898,7 @@ function ReportTab({ students, classes, exams, fetchClassMarksForExam, fetchStud
   const [cls, setCls] = useState(lockedClass || classes[0] || "");
   const [studentId, setStudentId] = useState("");
   const [term, setTerm] = useState(TERMS[1]);
-  const [year, setYear] = useState(EXAM_YEARS[1]);
+  const [year, setYear] = useState(CURRENT_YEAR);
   const [examName, setExamName] = useState(exams[0] || "");
   const [analysis, setAnalysis] = useState(null);
   const [history, setHistory] = useState([]);
