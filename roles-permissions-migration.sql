@@ -366,3 +366,43 @@ ALTER TABLE public.mpesa_transactions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "mpesa_transactions_admin_clerk" ON public.mpesa_transactions FOR ALL
   USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
   WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
+
+-- Fees by term: per-class fee for each term of a year, and the bills raised
+-- against each student (term 0 = balance brought forward from before billing).
+CREATE TABLE IF NOT EXISTS public.term_fee_structure (
+  class text not null,
+  year integer not null,
+  term integer not null check (term between 1 and 3),
+  amount numeric not null default 0,
+  primary key (class, year, term)
+);
+CREATE TABLE IF NOT EXISTS public.student_charges (
+  id uuid primary key default gen_random_uuid(),
+  student_id integer not null references public.students(id) on delete cascade,
+  year integer not null,
+  term integer not null check (term between 0 and 3),
+  description text,
+  amount numeric not null,
+  created_by uuid references public.staff_profiles(id),
+  created_at timestamptz not null default now(),
+  unique (student_id, year, term)
+);
+CREATE INDEX IF NOT EXISTS student_charges_student_idx ON public.student_charges (student_id);
+ALTER TABLE public.term_fee_structure ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.student_charges ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "term_fee_structure_admin_clerk" ON public.term_fee_structure FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
+CREATE POLICY "term_fee_structure_staff_view" ON public.term_fee_structure FOR SELECT
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid()));
+CREATE POLICY "student_charges_admin_clerk" ON public.student_charges FOR ALL
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])))
+  WITH CHECK (exists (select 1 from staff_profiles sp where sp.id = auth.uid() and sp.role = any (array['Admin','Clerk'])));
+CREATE POLICY "student_charges_staff_view" ON public.student_charges FOR SELECT
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid()));
+ALTER TABLE public.school_settings ADD COLUMN IF NOT EXISTS fee_cutover_date date;
+
+-- Alumni: leavers stay in the students table with status 'Alumni', keeping all
+-- their data, plus the class they left from and when.
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS left_date date;
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS left_class text;
