@@ -181,17 +181,17 @@ async function pgFetch(path, token, options = {}) {
 
 async function fetchSchoolData(token) {
   const [students, grades, attendance, payments, feeRows] = await Promise.all([
-    pgFetch("students?select=*&order=id", token),
+    pgFetchAll("students?select=*&order=id", token),
     pgFetch("grades?select=*", token),
-    pgFetch("attendance?select=*", token),
-    pgFetch("payments?select=*&order=id", token),
+    pgFetchAll("attendance?select=*&order=date,student_id", token),
+    pgFetchAll("payments?select=*&order=id", token),
     pgFetch("fee_structure?select=*", token),
   ]);
   return {
     students: students.map((s) => ({
       id: s.id, admissionNo: s.admission_no, name: s.name, gender: s.gender, class: s.class,
       guardian: s.guardian, relationship: s.relationship, phone: s.phone, enrolled: s.enrolled, status: s.status,
-      photoUrl: s.photo_url,
+      photoUrl: s.photo_url, leftDate: s.left_date || "", leftClass: s.left_class || "",
     })),
     grades: grades.map((g) => ({ studentId: g.student_id, subject: g.subject, term: g.term, score: g.score })),
     attendance: attendance.map((a) => ({ date: a.date, studentId: a.student_id, status: a.status })),
@@ -241,6 +241,7 @@ async function fetchSchoolSettings(token) {
     termClosingDate: r.term_closing_date || "", nextTermOpeningDate: r.next_term_opening_date || "",
     arrivalCutoff: (r.arrival_cutoff || "07:20:00").slice(0, 5), departureCutoff: (r.departure_cutoff || "17:00:00").slice(0, 5),
     currentTerm: r.current_term || DEFAULT_TERM,
+    feeCutoverDate: r.fee_cutover_date || "",
   };
 }
 
@@ -330,6 +331,75 @@ async function fetchPayslips(token) {
 const BOOK_SHELVES = ["Course Books", "Supplementary Books", "Story Books", "Encyclopedias", "Bibles", "Dictionary", "Amusing", "Atlas"];
 const PAYMENT_ACCOUNTS = ["School Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
 const COMPULSORY_ACCOUNTS = ["School Fees"];
+// ---- Fees by term -----------------------------------------------------
+// The school year has three terms. Fees are set per class for each term, and
+// each student is billed per term. Payments are applied to the oldest unpaid
+// bill first, so arrears carry forward and advance payments carry over.
+const SCHOOL_TERMS = [
+  { term: 1, label: "Term 1", months: "January – April" },
+  { term: 2, label: "Term 2", months: "May – August" },
+  { term: 3, label: "Term 3", months: "September – November" },
+];
+// The term a date falls in. December is the long holiday, so it points at
+// next year's Term 1 (the next one to bill).
+function termForDate(d = new Date()) {
+  const m = d.getMonth() + 1, y = d.getFullYear();
+  if (m <= 4) return { term: 1, year: y };
+  if (m <= 8) return { term: 2, year: y };
+  if (m <= 11) return { term: 3, year: y };
+  return { term: 1, year: y + 1 };
+}
+const termFeeKey = (cls, year, term) => `${cls}|${year}|${term}`;
+
+// One student's School Fees position. Before billing by term is started
+// (no cutover date) this is the old single-fee calculation, so nothing
+// changes until the school switches over.
+function schoolFeesSummary(student, env) {
+  const { feeStructure, payments, studentCharges, cutoverDate } = env;
+  const mine = payments.filter((p) => p.studentId === student.id && p.account === "School Fees");
+  if (!cutoverDate) {
+    const due = feeStructure[student.class] || 0;
+    const paid = mine.reduce((s, p) => s + p.amount, 0);
+    return { billing: false, due, paid, balance: due - paid, credit: Math.max(0, paid - due), terms: [] };
+  }
+  const charges = studentCharges
+    .filter((c) => c.studentId === student.id)
+    .sort((a, b) => (a.term === 0 ? 0 : a.year * 10 + a.term) - (b.term === 0 ? 0 : b.year * 10 + b.term));
+  // A negative brought-forward balance means the family was in credit.
+  const carriedCredit = charges.filter((c) => c.amount < 0).reduce((s, c) => s - c.amount, 0);
+  const bills = charges.filter((c) => c.amount > 0);
+  const poolTotal = mine.filter((p) => p.date >= cutoverDate).reduce((s, p) => s + p.amount, 0) + carriedCredit;
+  let pool = poolTotal;
+  const terms = bills.map((c) => {
+    const applied = Math.min(c.amount, Math.max(0, pool));
+    pool -= applied;
+    return { id: c.id, year: c.year, term: c.term, description: c.description, amount: c.amount, paid: applied, balance: c.amount - applied };
+  });
+  const due = bills.reduce((s, c) => s + c.amount, 0);
+  return { billing: true, due, paid: poolTotal, balance: due - poolTotal, credit: Math.max(0, poolTotal - due), terms };
+}
+function feeDueFor(student, acct, env, otherFeeStructure) {
+  if (acct === "School Fees") return schoolFeesSummary(student, env).due;
+  return otherFeeStructure[acct]?.[student.class] || 0;
+}
+function feePaidFor(student, acct, env) {
+  if (acct === "School Fees") return schoolFeesSummary(student, env).paid;
+  return env.payments.filter((p) => p.studentId === student.id && p.account === acct).reduce((s, p) => s + p.amount, 0);
+}
+// Who would be billed for a term, and who can't be (no fee set for their class).
+function planTermBilling(students, termFees, studentCharges, year, term) {
+  const billed = new Set(studentCharges.filter((c) => c.year === Number(year) && c.term === Number(term)).map((c) => c.studentId));
+  const toBill = [], noFee = new Set();
+  let already = 0;
+  students.forEach((s) => {
+    if (billed.has(s.id)) { already++; return; }
+    const amount = termFees[termFeeKey(s.class, year, term)];
+    if (!amount) { noFee.add(s.class); return; }
+    toBill.push({ student: s, amount });
+  });
+  return { toBill, already, noFeeClasses: [...noFee] };
+}
+
 // What's actually available to spend from an account: money collected,
 // minus what's been spent, plus/minus any inter-account borrowing (money
 // borrowed in counts for it, money borrowed out or repaid back doesn't).
@@ -1060,6 +1130,8 @@ export default function App() {
   const [leaveRequests, setLeaveRequests] = useState([]);
   const [staffDocuments, setStaffDocuments] = useState([]);
   const [mpesaTransactions, setMpesaTransactions] = useState([]);
+  const [termFees, setTermFees] = useState({});
+  const [studentCharges, setStudentCharges] = useState([]);
   const [view, setView] = useState("dashboard");
   const [attendanceLanding, setAttendanceLanding] = useState("students");
   const [toast, setToast] = useState(null);
@@ -1091,7 +1163,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows, mpesaRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows, mpesaRows, termFeeMap, chargeRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1107,6 +1179,8 @@ export default function App() {
         fetchLeaveRequests(token).catch(() => []),
         fetchStaffDocuments(token).catch(() => []),
         fetchMpesaTransactions(token).catch(() => []),
+        fetchTermFees(token).catch(() => ({})),
+        fetchStudentCharges(token).catch(() => []),
       ]);
       setStudents(school.students);
       setGrades(school.grades);
@@ -1124,6 +1198,8 @@ export default function App() {
       setLeaveRequests(leaveRows);
       setStaffDocuments(staffDocRows);
       setMpesaTransactions(mpesaRows);
+      setTermFees(termFeeMap);
+      setStudentCharges(chargeRows);
       setStaff(staffRows);
       setClasses(classNames.length ? classNames : FALLBACK_CLASSES);
       setSubjects(subjectNames.length ? subjectNames : FALLBACK_SUBJECTS);
@@ -1249,13 +1325,39 @@ export default function App() {
   // Moves every student currently in `fromClass` into `toClass` in one go —
   // the end-of-year promotion workflow, rather than editing each student
   // individually.
+  const ALUMNI_TARGET = "__ALUMNI__";
+  // Current students only (alumni are filtered out of every class list,
+  // register, exam and billing run).
+  const activeStudents = students.filter((s) => s.status !== "Alumni");
+  const alumni = students.filter((s) => s.status === "Alumni");
+  const graduateStudents = async (ids, leftDate) => {
+    const byClass = {};
+    students.filter((s) => ids.includes(s.id)).forEach((s) => { (byClass[s.class] = byClass[s.class] || []).push(s.id); });
+    for (const [cls, classIds] of Object.entries(byClass)) {
+      await pgFetch(`students?id=in.(${classIds.join(",")})`, authedUser.accessToken, {
+        method: "PATCH", body: { status: "Alumni", left_date: leftDate, left_class: cls }, prefer: "return=minimal",
+      });
+    }
+    setStudents((prev) => prev.map((s) => (ids.includes(s.id) ? { ...s, status: "Alumni", leftDate, leftClass: s.class } : s)));
+  };
+  const restoreAlumnus = async (id, className) => {
+    await pgFetch(`students?id=eq.${id}`, authedUser.accessToken, {
+      method: "PATCH", body: { status: "Active", class: className, left_date: null, left_class: null }, prefer: "return=minimal",
+    });
+    setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, status: "Active", class: className, leftDate: "", leftClass: "" } : s)));
+  };
+  // Moves a whole class up — or, with the Alumni target, out of the school.
   const promoteClassStudents = async (fromClass, toClass) => {
-    await pgFetch(`students?class=eq.${encodeURIComponent(fromClass)}`, authedUser.accessToken, {
+    if (toClass === ALUMNI_TARGET) {
+      await graduateStudents(students.filter((s) => s.class === fromClass && s.status !== "Alumni").map((s) => s.id), new Date().toISOString().slice(0, 10));
+      return;
+    }
+    await pgFetch(`students?class=eq.${encodeURIComponent(fromClass)}&status=neq.Alumni`, authedUser.accessToken, {
       method: "PATCH",
       body: { class: toClass },
       prefer: "return=minimal",
     });
-    setStudents((prev) => prev.map((s) => (s.class === fromClass ? { ...s, class: toClass } : s)));
+    setStudents((prev) => prev.map((s) => (s.class === fromClass && s.status !== "Alumni" ? { ...s, class: toClass } : s)));
   };
 
   // Adding a staff member here only adds them to the roster shown in the
@@ -1428,6 +1530,60 @@ export default function App() {
     setPayslips((prev) => [slip, ...prev.filter((p) => !(p.staffId === slip.staffId && p.month === month && p.year === year))]);
     return slip;
   };
+  // ---- Fees by term ----
+  const feeEnv = { feeStructure, payments, studentCharges, cutoverDate: schoolSettings?.feeCutoverDate || "" };
+  const insertCharges = async (rows) => {
+    const added = [];
+    for (let i = 0; i < rows.length; i += 200) {
+      const res = await pgFetch("student_charges?on_conflict=student_id,year,term", authedUser.accessToken, {
+        method: "POST", body: rows.slice(i, i + 200), prefer: "resolution=ignore-duplicates,return=representation",
+      });
+      added.push(...(res || []).map(mapChargeRow));
+    }
+    if (added.length) setStudentCharges((prev) => [...prev, ...added]);
+    return added.length;
+  };
+  const saveTermFee = async (cls, year, term, amount) => {
+    await pgFetch("term_fee_structure?on_conflict=class,year,term", authedUser.accessToken, {
+      method: "POST", body: { class: cls, year, term, amount: Number(amount) || 0 }, prefer: "resolution=merge-duplicates,return=minimal",
+    });
+    setTermFees((prev) => ({ ...prev, [termFeeKey(cls, year, term)]: Number(amount) || 0 }));
+  };
+  // Switches on billing by term: each student's current balance (old class
+  // fee less everything paid) becomes "Balance brought forward", and only
+  // payments dated from today count against the new term bills.
+  const startTermBilling = async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const year = new Date().getFullYear();
+    const rows = students.map((st) => {
+      const paid = payments.filter((p) => p.studentId === st.id && p.account === "School Fees").reduce((sum, p) => sum + p.amount, 0);
+      return { student_id: st.id, year, term: 0, description: "Balance brought forward", amount: (feeStructure[st.class] || 0) - paid, created_by: authedUser.id };
+    }).filter((r) => r.amount !== 0);
+    await insertCharges(rows);
+    await pgFetch("school_settings?id=eq.1", authedUser.accessToken, { method: "PATCH", body: { fee_cutover_date: today }, prefer: "return=minimal" });
+    setSchoolSettings((prev) => ({ ...prev, feeCutoverDate: today }));
+    return rows.length;
+  };
+  const billTerm = async (year, term, setCurrent) => {
+    const plan = planTermBilling(activeStudents, termFees, studentCharges, year, term);
+    const added = await insertCharges(plan.toBill.map(({ student, amount }) => ({ student_id: student.id, year: Number(year), term: Number(term), description: `Term ${term} ${year} fees`, amount, created_by: authedUser.id })));
+    if (setCurrent) {
+      await pgFetch("school_settings?id=eq.1", authedUser.accessToken, { method: "PATCH", body: { current_term: `Term ${term}` }, prefer: "return=minimal" });
+      setSchoolSettings((prev) => ({ ...prev, currentTerm: `Term ${term}` }));
+    }
+    return { billed: added, already: plan.already, noFeeClasses: plan.noFeeClasses };
+  };
+  const updateBroughtForward = async (studentId, amount) => {
+    const existing = studentCharges.find((c) => c.studentId === studentId && c.term === 0);
+    const year = existing ? existing.year : new Date().getFullYear();
+    const [row] = await pgFetch("student_charges?on_conflict=student_id,year,term", authedUser.accessToken, {
+      method: "POST", body: { student_id: studentId, year, term: 0, description: "Balance brought forward", amount: Number(amount) || 0, created_by: authedUser.id },
+      prefer: "resolution=merge-duplicates,return=representation",
+    });
+    const saved = mapChargeRow(row);
+    setStudentCharges((prev) => [...prev.filter((c) => !(c.studentId === studentId && c.term === 0)), saved]);
+  };
+
   // M-Pesa Till payments
   const importMpesaTransactions = async (rows) => {
     const added = await insertMpesaRows(authedUser.accessToken, rows, authedUser.id);
@@ -1839,7 +1995,7 @@ export default function App() {
   const canFrontOffice = isFrontOfficeRole(authedUser?.role);
   const canLibrary = isLibraryRole(authedUser?.role);
   const ctx = {
-    students, staff, grades, attendance, payments, feeStructure, otherFeeStructure, expenditures,
+    students: activeStudents, allStudents: students, alumni, graduateStudents, restoreAlumnus, staff, grades, attendance, payments, feeStructure, otherFeeStructure, expenditures,
     recordExpenditure, deleteExpenditure, schoolDays,
     accountLoans, recordLoan, repayLoan,
     smsMessages, sendBulkSms, sendBatchSms, recordSmsMessage,
@@ -1853,6 +2009,7 @@ export default function App() {
     leaveRequests, addLeave, decideLeave, deleteLeave,
     staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument,
     mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored,
+    termFees, studentCharges, feeEnv, saveTermFee, startTermBilling, billTerm, updateBroughtForward,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
@@ -1954,6 +2111,7 @@ export default function App() {
                 {view === "dashboard" && authedUser?.role === "Receptionist" && <ReceptionistDashboard {...ctx} />}
                 {view === "dashboard" && authedUser?.role === "Librarian" && <LibrarianDashboard {...ctx} />}
                 {view === "students" && isAdmin && <StudentsView {...ctx} />}
+                {view === "alumni" && (isAdmin || authedUser?.role === "Clerk") && <AlumniView {...ctx} />}
                 {view === "attendance" && <AttendanceView {...ctx} />}
                 {view === "grades" && <GradesView {...ctx} />}
                 {view === "fees" && canFinanceHR && <FeesView {...ctx} />}
@@ -2226,6 +2384,7 @@ function Sidebar({ view, setView, role, menuOpen }) {
   const allItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher", "Clerk", "Receptionist", "Librarian"] },
     { id: "students", label: "Students", icon: Users, roles: ADMIN_ROLES },
+    { id: "alumni", label: "Alumni", icon: GraduationCap, roles: [...ADMIN_ROLES, "Clerk"] },
     { id: "attendance", label: "Attendance", icon: CalendarCheck, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "grades", label: "Grades", icon: GraduationCap, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "fees", label: "Finance", icon: Wallet, roles: FINANCE_HR_ROLES },
@@ -2362,7 +2521,7 @@ function StatCard({ label, value, icon: Icon, tone, sub }) {
 /* ---------------------------------------------------------------------- *
  *  DASHBOARD
  * ---------------------------------------------------------------------- */
-function Dashboard({ students, staff, attendance, grades, payments, feeStructure, schoolDays, classes, schoolSettings, events, notifications, setView, goToStaffAttendance }) {
+function Dashboard({ students, staff, attendance, grades, payments, feeStructure, schoolDays, classes, schoolSettings, events, notifications, setView, goToStaffAttendance, feeEnv}) {
   const now = new Date();
   const nowMinutes = now.getHours() * 60 + now.getMinutes();
   const showArrivalReminder = nowMinutes >= 8 * 60;
@@ -2371,8 +2530,9 @@ function Dashboard({ students, staff, attendance, grades, payments, feeStructure
   const todayRecs = attendance.filter((a) => a.date === latestDay);
   const presentToday = todayRecs.filter((a) => a.status !== "Absent").length;
   const attendanceRate = todayRecs.length ? Math.round((presentToday / todayRecs.length) * 100) : 0;
-  const totalDue = students.reduce((s, st) => s + (feeStructure[st.class] || 0), 0);
-  const totalPaid = payments.filter((p) => p.account === "School Fees").reduce((s, p) => s + p.amount, 0);
+  const feeSummaries = students.map((st) => ({ st, f: schoolFeesSummary(st, feeEnv) }));
+  const totalDue = feeSummaries.reduce((s, x) => s + x.f.due, 0);
+  const totalPaid = feeSummaries.reduce((s, x) => s + x.f.paid, 0);
   const outstanding = totalDue - totalPaid;
   const upcoming = (events || []).filter((e) => e.to >= new Date().toISOString().slice(0,10)).slice(0,6);
 
@@ -2381,8 +2541,9 @@ function Dashboard({ students, staff, attendance, grades, payments, feeStructure
     const recs = attendance.filter((a) => a.date === latestDay && roster.some((s) => s.id === a.studentId));
     const present = recs.filter((a) => a.status !== "Absent").length;
     const rate = recs.length ? Math.round((present / recs.length) * 100) : 0;
-    const due = roster.length * (feeStructure[c] || 0);
-    const paid = payments.filter((p) => p.account === "School Fees" && roster.some((s) => s.id === p.studentId)).reduce((sum, p) => sum + p.amount, 0);
+    const classFees = feeSummaries.filter((x) => x.st.class === c);
+    const due = classFees.reduce((sum, x) => sum + x.f.due, 0);
+    const paid = classFees.reduce((sum, x) => sum + x.f.paid, 0);
     return { class: c, count: roster.length, rate, due, paid };
   });
 
@@ -2601,10 +2762,10 @@ function TeacherDashboard({ authedUser, students, attendance, classes, events, e
 /* ---------------------------------------------------------------------- *
  *  CLERK DASHBOARD — fees collection + HR/payroll at a glance
  * ---------------------------------------------------------------------- */
-function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll, payslips, leaveRequests, setView }) {
-  const totalDue = students.reduce((s, st) => s + (feeStructure[st.class] || 0), 0);
-  const schoolFeesPayments = payments.filter((p) => p.account === "School Fees");
-  const totalPaid = schoolFeesPayments.reduce((s, p) => s + p.amount, 0);
+function ClerkDashboard({ students, feeStructure, payments, staff, staffPayroll, payslips, leaveRequests, feeEnv, setView }) {
+  const clerkFees = students.map((st) => schoolFeesSummary(st, feeEnv));
+  const totalDue = clerkFees.reduce((s, f) => s + f.due, 0);
+  const totalPaid = clerkFees.reduce((s, f) => s + f.paid, 0);
   const outstanding = totalDue - totalPaid;
   const recentPayments = [...payments].sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 5);
 
@@ -2981,7 +3142,7 @@ function StudentsView(ctx) {
           onPromote={async (fromClass, toClass) => {
             try {
               await promoteClassStudents(fromClass, toClass);
-              showToast(`Promoted everyone in ${fromClass} to ${toClass}`);
+              showToast(toClass === "__ALUMNI__" ? `Moved everyone in ${fromClass} to Alumni` : `Promoted everyone in ${fromClass} to ${toClass}`);
               setPromoteOpen(false);
             } catch (err) {
               showToast(err.message || "Couldn't promote class");
@@ -2996,6 +3157,77 @@ function StudentsView(ctx) {
 // Bulk-moves every student in one class into another — the end-of-year
 // promotion workflow (Grade 3 → Grade 4 for everyone at once), rather than
 // editing each student's class individually.
+// Former students. Their records (guardian, contacts, class they left from,
+// fee history) are kept; they just no longer appear in classes, attendance,
+// exams or billing. Any unpaid fees stay visible here.
+function AlumniView({ alumni, classes, feeEnv, restoreAlumnus, showToast }) {
+  const [q, setQ] = useState("");
+  const [yearFilter, setYearFilter] = useState("All");
+  const [openId, setOpenId] = useState(null);
+  const [restoreClass, setRestoreClass] = useState(classes[0] || "");
+  const years = [...new Set(alumni.map((a) => (a.leftDate || "").slice(0, 4)).filter(Boolean))].sort().reverse();
+  const ql = q.trim().toLowerCase();
+  const shown = alumni
+    .filter((a) => (yearFilter === "All" || (a.leftDate || "").startsWith(yearFilter)) && (!ql || a.name.toLowerCase().includes(ql) || String(a.admissionNo || "").toLowerCase().includes(ql) || (a.guardian || "").toLowerCase().includes(ql)))
+    .sort((a, b) => (b.leftDate || "").localeCompare(a.leftDate || "") || a.name.localeCompare(b.name));
+  const owingTotal = alumni.reduce((s, a) => s + Math.max(0, schoolFeesSummary(a, feeEnv).balance), 0);
+
+  const restore = async (a) => {
+    if (!window.confirm(`Move ${a.name} back to ${restoreClass} as a current student?`)) return;
+    try { await restoreAlumnus(a.id, restoreClass); showToast(`${a.name} is back in ${restoreClass}`); setOpenId(null); }
+    catch (err) { showToast(err.message || "Couldn't restore"); }
+  };
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1040 }}>
+      <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Alumni</h2>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 16 }}>Students who have left the school, with their records kept. Move students here from the Promote Class screen or a student's profile.</p>
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, admission no. or guardian" className="focus-ring" style={{ ...inputStyle, width: 300 }} />
+        <select value={yearFilter} onChange={(e) => setYearFilter(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 150 }}>
+          <option value="All">All years</option>{years.map((y) => <option key={y} value={y}>Left in {y}</option>)}
+        </select>
+        <span style={{ fontSize: 12.5, color: "#6b6656", marginLeft: "auto" }}>{alumni.length} alumni{owingTotal > 0 ? ` · ${money(owingTotal)} fees still owed` : ""}</span>
+      </div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1.2fr 1fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>
+          <span>Name</span><span>Class left</span><span>Date left</span><span>Guardian</span><span>Fees owing</span>
+        </div>
+        {shown.map((a) => {
+          const f = schoolFeesSummary(a, feeEnv);
+          const owing = Math.max(0, f.balance);
+          return (
+            <div key={a.id} style={{ borderTop: `1px solid ${LINE}` }}>
+              <button onClick={() => setOpenId(openId === a.id ? null : a.id)} className="focus-ring" style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1.2fr 1fr", width: "100%", textAlign: "left", padding: "9px 16px", fontSize: 13, background: "none", border: "none", cursor: "pointer", alignItems: "center" }}>
+                <span style={{ fontWeight: 600 }}>{a.name}<span style={{ display: "block", fontSize: 11, color: "#6b6656", fontWeight: 400 }}>{a.admissionNo}</span></span>
+                <span>{a.leftClass || a.class}</span>
+                <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{a.leftDate || "—"}</span>
+                <span style={{ fontSize: 12 }}>{a.guardian || "—"}</span>
+                <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: owing ? "#a1442c" : "#2f6f4a" }}>{owing ? money(owing) : "Cleared"}</span>
+              </button>
+              {openId === a.id && (
+                <div className="flex items-end gap-6 flex-wrap" style={{ padding: "4px 16px 14px", fontSize: 12.5, color: "#4a4536" }}>
+                  <div style={{ lineHeight: 1.7 }}>
+                    <div><b>Guardian:</b> {a.guardian || "—"}{a.relationship ? ` (${a.relationship})` : ""}</div>
+                    <div><b>Phone:</b> {a.phone || "—"}</div>
+                    <div><b>Gender:</b> {a.gender || "—"} · <b>Enrolled:</b> {a.enrolled || "—"}</div>
+                    <div><b>Fees paid (school fees):</b> {money(f.paid)}</div>
+                  </div>
+                  <div className="flex items-end gap-2">
+                    <Field label="Restore to class"><select value={restoreClass} onChange={(e) => setRestoreClass(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 150 }}>{classes.map((c) => <option key={c}>{c}</option>)}</select></Field>
+                    <button onClick={() => restore(a)} className="focus-ring" style={{ padding: "9px 14px", borderRadius: 8, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>Restore</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {shown.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>{alumni.length === 0 ? "No alumni yet." : "No alumni match."}</div>}
+      </div>
+    </div>
+  );
+}
+
 function PromoteClassModal({ students, classes, onClose, onPromote }) {
   const [fromClass, setFromClass] = useState(classes[0] || "");
   const [toClass, setToClass] = useState(classes[1] || classes[0] || "");
@@ -3006,7 +3238,8 @@ function PromoteClassModal({ students, classes, onClose, onPromote }) {
     if (!fromClass || !toClass) return;
     if (fromClass === toClass) return;
     if (affected === 0) return;
-    if (!window.confirm(`Move all ${affected} student${affected === 1 ? "" : "s"} from ${fromClass} to ${toClass}? This can't be undone automatically.`)) return;
+    const toLabel = toClass === "__ALUMNI__" ? "Alumni (leaving school)" : toClass;
+    if (!window.confirm(`Move all ${affected} student${affected === 1 ? "" : "s"} from ${fromClass} to ${toLabel}?${toClass === "__ALUMNI__" ? " Their records are kept under Alumni and they can be restored." : " This can't be undone automatically."}`)) return;
     setPromoting(true);
     try {
       await onPromote(fromClass, toClass);
@@ -3024,20 +3257,20 @@ function PromoteClassModal({ students, classes, onClose, onPromote }) {
         </div>
         <div className="flex flex-col gap-3">
           <Field label="From class"><select value={fromClass} onChange={(e) => setFromClass(e.target.value)} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}</select></Field>
-          <Field label="To class"><select value={toClass} onChange={(e) => setToClass(e.target.value)} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}</select></Field>
+          <Field label="To class"><select value={toClass} onChange={(e) => setToClass(e.target.value)} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}<option value="__ALUMNI__">Alumni (leaving school)</option></select></Field>
         </div>
         <p style={{ fontSize: 12.5, color: "#7A7568", marginTop: 14 }}>
-          {fromClass === toClass ? "Pick two different classes." : `This moves all ${affected} student${affected === 1 ? "" : "s"} currently in ${fromClass} into ${toClass}.`}
+          {fromClass === toClass ? "Pick two different classes." : toClass === "__ALUMNI__" ? `This moves all ${affected} student${affected === 1 ? "" : "s"} in ${fromClass} to Alumni, keeping their records.` : `This moves all ${affected} student${affected === 1 ? "" : "s"} currently in ${fromClass} into ${toClass}.`}
         </p>
         <button type="button" onClick={submit} disabled={promoting || fromClass === toClass || affected === 0} className="focus-ring" style={{ width: "100%", marginTop: 18, padding: "10px 0", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: promoting ? "wait" : "pointer", opacity: fromClass === toClass || affected === 0 ? 0.5 : 1 }}>
-          {promoting ? "Promoting…" : `Promote ${affected} Student${affected === 1 ? "" : "s"}`}
+          {promoting ? "Working…" : toClass === "__ALUMNI__" ? `Move ${affected} Student${affected === 1 ? "" : "s"} to Alumni` : `Promote ${affected} Student${affected === 1 ? "" : "s"}`}
         </button>
       </div>
     </div>
   );
 }
 
-function StudentProfile({ student, onClose, grades, attendance, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings }) {
+function StudentProfile({ student, onClose, grades, attendance, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings, feeEnv, graduateStudents }) {
   const [tab, setTab] = useState("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -3048,9 +3281,8 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
   const present = myAttendance.filter((a) => a.status !== "Absent").length;
   const rate = myAttendance.length ? Math.round((present / myAttendance.length) * 100) : 0;
   const myPayments = payments.filter((p) => p.studentId === student.id);
-  const due = feeStructure[student.class] || 0;
-  const paid = myPayments.filter((p) => p.account === "School Fees").reduce((s, p) => s + p.amount, 0);
-  const balance = due - paid;
+  const feeSummary = schoolFeesSummary(student, feeEnv);
+  const { due, paid, balance } = feeSummary;
 
   const confirmedDelete = async () => {
     setDeleting(true);
@@ -3090,6 +3322,13 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
               <>
                 <button onClick={() => setEditOpen(true)} className="focus-ring flex items-center gap-1" title="Edit student details" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: BG, color: "#5b5747", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
                   <Pencil size={12} /> Edit
+                </button>
+                <button onClick={async () => {
+                  if (!window.confirm(`Move ${student.name} to Alumni? Their records are kept, and they leave ${student.class}, attendance, exams and billing. You can restore them later.`)) return;
+                  try { await graduateStudents([student.id], new Date().toISOString().slice(0, 10)); showToast(`${student.name} moved to Alumni`); onClose(); }
+                  catch (err) { showToast(err.message || "Couldn't move to Alumni"); }
+                }} className="focus-ring flex items-center gap-1" title="Move to Alumni (left school)" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: BG, color: "#5b5747", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+                  <GraduationCap size={12} /> Alumni
                 </button>
                 <button onClick={() => setConfirmDelete(true)} className="focus-ring flex items-center gap-1" title="Delete student" style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid #F0CFC4`, background: "#FBEDE7", color: "#a1442c", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
                   <Trash2 size={12} /> Delete
@@ -3154,7 +3393,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
             </div>
           )}
           {tab === "payments" && (
-            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPaymentBatch={recordPaymentBatch} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} />
+            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPaymentBatch={recordPaymentBatch} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} feeTerms={feeSummary.billing ? feeSummary.terms : null} />
           )}
         </div>
       </div>
@@ -3210,18 +3449,30 @@ function AttendanceBadge({ status }) {
   return <span className="flex items-center gap-1.5" style={{ color: m.color, fontSize: 12.5, fontWeight: 600 }}><Icon size={13} />{status}</span>;
 }
 
-function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPaymentBatch, deletePayment, showToast, schoolSettings }) {
+function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPaymentBatch, deletePayment, showToast, schoolSettings, feeTerms }) {
   const [payOpen, setPayOpen] = useState(false);
   const dueForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? due : (otherFeeStructure[acct]?.[student.class] || 0));
-  const paidToDateForAccount = (acct) => payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
+  const paidToDateForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? paid : payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0));
 
   return (
     <div>
+      {feeTerms && feeTerms.length > 0 && (
+        <div style={{ border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 12, overflow: "hidden" }}>
+          <div style={{ padding: "7px 10px", fontSize: 10.5, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>Fees by term (oldest paid first)</div>
+          {feeTerms.map((t) => (
+            <div key={t.id} className="flex items-center justify-between" style={{ padding: "6px 10px", fontSize: 12, borderTop: `1px solid ${LINE}` }}>
+              <span style={{ fontWeight: 600 }}>{t.term === 0 ? "Brought forward" : `Term ${t.term} ${t.year}`}</span>
+              <span style={{ fontFamily: MONO_FONT, color: "#6b6656" }}>{money(t.amount)}</span>
+              <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: t.balance > 0 ? "#a1442c" : "#2f6f4a" }}>{t.balance > 0 ? `${money(t.balance)} owing` : "Paid"}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2 mb-3">
         {PAYMENT_ACCOUNTS.map((acct) => {
           const isCompulsory = COMPULSORY_ACCOUNTS.includes(acct);
           const acctDue = isCompulsory ? due : (otherFeeStructure[acct]?.[student.class] || 0);
-          const acctPaid = payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
+          const acctPaid = isCompulsory ? paid : payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
           const acctBalance = acctDue - acctPaid;
           return (
             <div key={acct} style={{ border: `1px solid ${LINE}`, borderRadius: 10, padding: "8px 10px" }}>
@@ -3633,8 +3884,8 @@ function GradesView({ students, classes, exams, fetchClassMarksForExam, classGra
  * ---------------------------------------------------------------------- */
 function FeesView(ctx) {
   const [tab, setTab] = useState("fees");
-  const tabs = ["fees", "other", "mpesa", "accounts", "expenditure"];
-  const labels = { fees: "School Fees", other: "Other Payments", mpesa: "M-Pesa", accounts: "Accounts", expenditure: "Expenditure" };
+  const tabs = ["fees", "other", "billing", "mpesa", "accounts", "expenditure"];
+  const labels = { fees: "School Fees", other: "Other Payments", billing: "Term Billing", mpesa: "M-Pesa", accounts: "Accounts", expenditure: "Expenditure" };
   return (
     <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
       <div className="flex items-center justify-between mb-5">
@@ -3651,6 +3902,7 @@ function FeesView(ctx) {
       {tab === "fees" && <SchoolFeesTab {...ctx} />}
       {tab === "other" && <OtherPaymentsTab {...ctx} />}
       {tab === "accounts" && <AccountsOverviewTab {...ctx} />}
+      {tab === "billing" && <TermBillingTab {...ctx} />}
       {tab === "mpesa" && <MpesaTab {...ctx} />}
       {tab === "expenditure" && <ExpenditureTab {...ctx} />}
     </div>
@@ -3704,15 +3956,14 @@ function buildFeeStatusHtml({ rows, schoolSettings }) {
   `;
 }
 
-function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, classes, schoolSettings }) {
+function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, classes, schoolSettings, feeEnv }) {
   const [cls, setCls] = useState("All");
   const [modalStudent, setModalStudent] = useState(null);
   const roster = students.filter((s) => cls === "All" || s.class === cls);
 
   const rows = roster.map((s) => {
-    const due = feeStructure[s.class] || 0;
-    const paid = payments.filter((p) => p.studentId === s.id && p.account === "School Fees").reduce((sum, p) => sum + p.amount, 0);
-    return { student: s, due, paid, balance: due - paid };
+    const f = schoolFeesSummary(s, feeEnv);
+    return { student: s, due: f.due, paid: f.paid, balance: f.balance };
   });
 
   const totalDue = rows.reduce((s, r) => s + r.due, 0);
@@ -3764,17 +4015,17 @@ function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, 
       {modalStudent && (
         <MultiPayModal
           student={modalStudent}
-          dueForAccount={(acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0))}
-          paidToDateForAccount={(acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0)}
+          dueForAccount={(acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure)}
+          paidToDateForAccount={(acct) => feePaidFor(modalStudent, acct, feeEnv)}
           onClose={() => setModalStudent(null)}
           onSubmit={async ({ date, method, entries }) => {
             try {
               const saved = await recordPaymentBatch(modalStudent.id, { date, method, entries });
               const total = entries.reduce((s, e) => s + e.amount, 0);
               showToast(`Recorded ${money(total)} for ${modalStudent.name}`);
-              const dueForAccount = (acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0));
+              const dueForAccount = (acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure);
               const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
-              const paidToDateForAccount = (acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0) + (entryAmount[acct] || 0);
+              const paidToDateForAccount = (acct) => feePaidFor(modalStudent, acct, feeEnv) + (entryAmount[acct] || 0);
               printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payments: saved, date, method, receiptId: saved[0].id, dueForAccount, paidToDateForAccount }), "A5");
               setModalStudent(null);
             } catch (err) {
@@ -3790,7 +4041,7 @@ function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, 
 // The three optional accounts (Food, Exams, Transport) — same billing-table
 // shape as School Fees, but switchable between accounts, and a class
 // without a set amount just shows what's been paid with no due/balance nag.
-function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePayment, showToast, otherFeeStructure, feeStructure, classes, schoolSettings }) {
+function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePayment, showToast, otherFeeStructure, feeStructure, classes, schoolSettings, feeEnv }) {
   const OPTIONAL_ACCOUNTS = PAYMENT_ACCOUNTS.filter((a) => !COMPULSORY_ACCOUNTS.includes(a));
   const [account, setAccount] = useState(OPTIONAL_ACCOUNTS[0]);
   const [cls, setCls] = useState("All");
@@ -3848,17 +4099,17 @@ function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePaymen
       {modalStudent && (
         <MultiPayModal
           student={modalStudent}
-          dueForAccount={(acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0))}
-          paidToDateForAccount={(acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0)}
+          dueForAccount={(acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure)}
+          paidToDateForAccount={(acct) => feePaidFor(modalStudent, acct, feeEnv)}
           onClose={() => setModalStudent(null)}
           onSubmit={async ({ date, method, entries }) => {
             try {
               const saved = await recordPaymentBatch(modalStudent.id, { date, method, entries });
               const total = entries.reduce((s, e) => s + e.amount, 0);
               showToast(`Recorded ${money(total)} for ${modalStudent.name}`);
-              const dueForAccount = (acct) => (acct === "School Fees" ? (feeStructure[modalStudent.class] || 0) : (otherFeeStructure[acct]?.[modalStudent.class] || 0));
+              const dueForAccount = (acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure);
               const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
-              const paidToDateForAccount = (acct) => payments.filter((p) => p.studentId === modalStudent.id && p.account === acct).reduce((s, p) => s + p.amount, 0) + (entryAmount[acct] || 0);
+              const paidToDateForAccount = (acct) => feePaidFor(modalStudent, acct, feeEnv) + (entryAmount[acct] || 0);
               printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payments: saved, date, method, receiptId: saved[0].id, dueForAccount, paidToDateForAccount }), "A5");
               setModalStudent(null);
             } catch (err) {
@@ -4022,7 +4273,7 @@ function phoneMatches(stored, normalized, hash) {
   return s.replace(/\D/g, "").endsWith(normalized.slice(-9));
 }
 
-function MpesaTab({ students, payments, feeStructure, otherFeeStructure, schoolSettings, mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored, recordPaymentBatch, showToast }) {
+function MpesaTab({ students, allStudents, payments, feeStructure, otherFeeStructure, feeEnv, schoolSettings, mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored, recordPaymentBatch, showToast }) {
   const [q, setQ] = useState("");
   const [qHash, setQHash] = useState("");
   const [statusFilter, setStatusFilter] = useState("Unallocated");
@@ -4077,12 +4328,12 @@ function MpesaTab({ students, payments, feeStructure, otherFeeStructure, schoolS
     return t.code.toLowerCase().includes(ql) || t.senderName.toLowerCase().includes(ql) || t.details.toLowerCase().includes(ql)
       || String(t.amount) === ql.replace(/,/g, "") || phoneMatches(t.senderPhone, normalized, qHash);
   });
-  const studentName = (id) => students.find((s) => s.id === id)?.name || "—";
+  const studentName = (id) => (allStudents || students).find((s) => s.id === id)?.name || "—";
   const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
   const studentMatches = students.filter((s) => { const x = studentQ.trim().toLowerCase(); return !x || s.name.toLowerCase().includes(x) || String(s.admissionNo || "").toLowerCase().includes(x); }).slice(0, 8);
 
-  const dueFor = (student) => (acct) => (acct === "School Fees" ? (feeStructure[student.class] || 0) : (otherFeeStructure[acct]?.[student.class] || 0));
-  const paidFor = (student) => (acct) => payments.filter((p) => p.studentId === student.id && p.account === acct).reduce((s, p) => s + p.amount, 0);
+  const dueFor = (student) => (acct) => feeDueFor(student, acct, feeEnv, otherFeeStructure);
+  const paidFor = (student) => (acct) => feePaidFor(student, acct, feeEnv);
 
   const finishAllocation = async ({ date, entries }) => {
     const tx = allocating, student = pickStudent;
@@ -4191,6 +4442,157 @@ function MpesaTab({ students, payments, feeStructure, otherFeeStructure, schoolS
           onSubmit={finishAllocation}
         />
       )}
+    </div>
+  );
+}
+
+// Fees by term: set each class's fee per term, bill a term, and review
+// brought-forward balances. Billing is switched on once, by "Start term billing".
+function TermBillingTab({ students, allStudents, classes, termFees, studentCharges, feeEnv, schoolSettings, feeStructure, payments, saveTermFee, startTermBilling, billTerm, updateBroughtForward, showToast }) {
+  const cutover = schoolSettings?.feeCutoverDate || "";
+  const suggested = termForDate();
+  const [year, setYear] = useState(suggested.year);
+  const [term, setTerm] = useState(suggested.term);
+  const [edits, setEdits] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [setCurrent, setSetCurrent] = useState(true);
+  const [bfEdits, setBfEdits] = useState({});
+  const everyone = allStudents || students;
+  const years = [suggested.year - 1, suggested.year, suggested.year + 1];
+
+  // ---- not started yet ----
+  if (!cutover) {
+    const preview = everyone.map((st) => {
+      const paid = payments.filter((p) => p.studentId === st.id && p.account === "School Fees").reduce((s, p) => s + p.amount, 0);
+      return (feeStructure[st.class] || 0) - paid;
+    });
+    const owing = preview.filter((b) => b > 0), credit = preview.filter((b) => b < 0);
+    const start = async () => {
+      if (!window.confirm("Start billing by term?\n\nEach student's current balance will be recorded as 'Balance brought forward', and from today new payments will count against term bills. This can't be undone automatically.")) return;
+      setBusy(true);
+      try {
+        const n = await startTermBilling();
+        showToast(`Term billing started — ${n} balance${n === 1 ? "" : "s"} carried forward`);
+      } catch (err) { showToast(err.message || "Couldn't start term billing"); }
+      finally { setBusy(false); }
+    };
+    return (
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20, maxWidth: 720 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Start billing by term</h3>
+        <p style={{ fontSize: 13, color: "#6b6656", lineHeight: 1.5, marginBottom: 12 }}>
+          At the moment each student has one fee for the whole year. Starting term billing lets you set a different fee for each term, bill each term separately, and carry unpaid fees forward automatically.
+        </p>
+        <ul style={{ fontSize: 13, color: "#4a4536", lineHeight: 1.7, marginBottom: 14, paddingLeft: 18, listStyle: "disc" }}>
+          <li>Today's balances become <b>Balance brought forward</b>: {owing.length} student{owing.length === 1 ? "" : "s"} owing {money(owing.reduce((s, b) => s + b, 0))}{credit.length ? `, and ${credit.length} in credit (${money(-credit.reduce((s, b) => s + b, 0))})` : ""}.</li>
+          <li>From today, new payments are applied to the oldest unpaid bill first. Payments dated before today are already counted in the brought-forward balances.</li>
+          <li>Then set the fee per class for each term and bill Term 1.</li>
+        </ul>
+        <button onClick={start} disabled={busy} className="focus-ring" style={{ padding: "10px 18px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: busy ? "wait" : "pointer" }}>{busy ? "Starting…" : "Start term billing"}</button>
+      </div>
+    );
+  }
+
+  // ---- started ----
+  const cellValue = (cls, t) => { const k = termFeeKey(cls, year, t); return edits[k] ?? (termFees[k] != null ? String(termFees[k]) : ""); };
+  const dirty = Object.keys(edits).length > 0;
+  const saveFees = async () => {
+    setSaving(true);
+    try {
+      for (const [k, v] of Object.entries(edits)) { const [cls, y, t] = k.split("|"); await saveTermFee(cls, Number(y), Number(t), v); }
+      setEdits({});
+      showToast("Term fees saved");
+    } catch (err) { showToast(err.message || "Couldn't save fees"); }
+    finally { setSaving(false); }
+  };
+
+  const plan = planTermBilling(students, termFees, studentCharges, year, term);
+  const planTotal = plan.toBill.reduce((s, x) => s + x.amount, 0);
+  const doBill = async () => {
+    if (dirty) { showToast("Save the term fees first"); return; }
+    setBusy(true);
+    try {
+      const r = await billTerm(year, term, setCurrent);
+      showToast(`Term ${term} ${year}: billed ${r.billed} student${r.billed === 1 ? "" : "s"}`);
+    } catch (err) { showToast(err.message || "Couldn't bill the term"); }
+    finally { setBusy(false); }
+  };
+
+  const history = {};
+  studentCharges.filter((c) => c.term > 0).forEach((c) => { const k = `${c.year}-${c.term}`; history[k] = history[k] || { year: c.year, term: c.term, count: 0, total: 0 }; history[k].count++; history[k].total += c.amount; });
+  const historyRows = Object.values(history).sort((a, b) => b.year - a.year || b.term - a.term);
+  const bfRows = everyone.map((st) => ({ st, bf: studentCharges.find((c) => c.studentId === st.id && c.term === 0) })).filter((r) => r.bf && (r.bf.amount !== 0 || bfEdits[r.st.id] != null));
+  const saveBf = async (st) => {
+    const v = bfEdits[st.id];
+    if (v == null) return;
+    try { await updateBroughtForward(st.id, v); setBfEdits((e) => { const n = { ...e }; delete n[st.id]; return n; }); showToast(`Updated ${st.name}'s brought-forward balance`); }
+    catch (err) { showToast(err.message || "Couldn't update"); }
+  };
+
+  return (
+    <div>
+      <p style={{ fontSize: 12.5, color: "#6b6656", marginBottom: 14 }}>Billing by term started on <b>{cutover}</b>. Terms: {SCHOOL_TERMS.map((t) => `${t.label} (${t.months})`).join(" · ")}.</p>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <h3 style={{ fontSize: 13.5, fontWeight: 700 }}>Fee per class, by term</h3>
+          <Field label="Year"><select value={year} onChange={(e) => setYear(Number(e.target.value))} className="focus-ring" style={{ ...inputStyle, width: 110 }}>{years.map((y) => <option key={y}>{y}</option>)}</select></Field>
+        </div>
+        <div style={{ border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr", padding: "9px 14px", fontSize: 11, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>
+            <span>Class</span>{SCHOOL_TERMS.map((t) => <span key={t.term}>{t.label}</span>)}
+          </div>
+          {classes.map((cls) => (
+            <div key={cls} style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr", padding: "7px 14px", alignItems: "center", borderTop: `1px solid ${LINE}`, gap: 8 }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>{cls}</span>
+              {SCHOOL_TERMS.map((t) => (
+                <input key={t.term} type="number" min={0} value={cellValue(cls, t.term)} placeholder="0"
+                  onChange={(e) => setEdits((ed) => ({ ...ed, [termFeeKey(cls, year, t.term)]: e.target.value }))}
+                  className="focus-ring" style={{ padding: "6px 8px", borderRadius: 7, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12.5, width: "100%" }} />
+              ))}
+            </div>
+          ))}
+        </div>
+        <button onClick={saveFees} disabled={!dirty || saving} className="focus-ring" style={{ marginTop: 12, padding: "9px 16px", borderRadius: 9, border: "none", background: dirty ? ACCENT : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 13, cursor: dirty ? "pointer" : "not-allowed" }}>{saving ? "Saving…" : "Save fees"}</button>
+      </div>
+
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+        <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>Bill a term</h3>
+        <p style={{ fontSize: 12, color: "#7A7568", marginBottom: 10 }}>Bills every enrolled student at their current class's fee. Promote classes first when starting a new year. Students already billed for the term are skipped, so it's safe to run again for late joiners.</p>
+        <div className="flex items-end gap-3 flex-wrap">
+          <Field label="Year"><select value={year} onChange={(e) => setYear(Number(e.target.value))} className="focus-ring" style={{ ...inputStyle, width: 110 }}>{years.map((y) => <option key={y}>{y}</option>)}</select></Field>
+          <Field label="Term"><select value={term} onChange={(e) => setTerm(Number(e.target.value))} className="focus-ring" style={{ ...inputStyle, width: 130 }}>{SCHOOL_TERMS.map((t) => <option key={t.term} value={t.term}>{t.label}</option>)}</select></Field>
+          <label className="flex items-center gap-1.5" style={{ fontSize: 12.5, paddingBottom: 9 }}><input type="checkbox" checked={setCurrent} onChange={(e) => setSetCurrent(e.target.checked)} /> Also set the current term to Term {term}</label>
+          <button onClick={doBill} disabled={busy || plan.toBill.length === 0} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: plan.toBill.length ? RAIL : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 13, cursor: plan.toBill.length && !busy ? "pointer" : "not-allowed" }}>{busy ? "Billing…" : `Bill Term ${term} ${year}`}</button>
+        </div>
+        <p style={{ fontSize: 12.5, marginTop: 10, color: "#4a4536" }}>
+          Will bill <b>{plan.toBill.length}</b> student{plan.toBill.length === 1 ? "" : "s"} · <b>{money(planTotal)}</b>
+          {plan.already > 0 && <> · {plan.already} already billed</>}
+          {plan.noFeeClasses.length > 0 && <span style={{ color: "#a1442c", fontWeight: 600 }}> · no fee set for: {plan.noFeeClasses.join(", ")}</span>}
+        </p>
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Terms billed</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 18 }}>
+        {historyRows.map((h) => (
+          <div key={`${h.year}-${h.term}`} className="flex items-center justify-between" style={{ padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}` }}>
+            <span style={{ fontWeight: 600 }}>Term {h.term} {h.year}</span><span>{h.count} students</span><span style={{ fontFamily: MONO_FONT, fontWeight: 700 }}>{money(h.total)}</span>
+          </div>
+        ))}
+        {historyRows.length === 0 && <div className="text-center py-6" style={{ color: "#a39c86", fontSize: 13 }}>No terms billed yet.</div>}
+      </div>
+
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Balances brought forward (negative = in credit)</div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        {bfRows.map(({ st, bf }) => (
+          <div key={st.id} className="flex items-center justify-between gap-3" style={{ padding: "7px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}` }}>
+            <span style={{ fontWeight: 600, flex: 1 }}>{st.name} <span style={{ color: "#6b6656", fontWeight: 400 }}>· {st.status === "Alumni" ? `Alumni (${st.leftClass || st.class})` : st.class}</span></span>
+            <input type="number" value={bfEdits[st.id] ?? bf.amount} onChange={(e) => setBfEdits((ed) => ({ ...ed, [st.id]: e.target.value }))} className="focus-ring" style={{ width: 120, padding: "5px 8px", borderRadius: 7, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12.5 }} />
+            <button onClick={() => saveBf(st)} disabled={bfEdits[st.id] == null} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 700, cursor: bfEdits[st.id] == null ? "default" : "pointer", opacity: bfEdits[st.id] == null ? 0.5 : 1 }}>Save</button>
+          </div>
+        ))}
+        {bfRows.length === 0 && <div className="text-center py-6" style={{ color: "#a39c86", fontSize: 13 }}>No balances were brought forward.</div>}
+      </div>
     </div>
   );
 }
@@ -8134,6 +8536,27 @@ const leaveTypeOf = (key) => LEAVE_TYPES.find((t) => t.key === key);
 const leaveAllowance = (t) => (t.agreed ? null : (t.allowance != null ? t.allowance : t.fullDays + t.halfDays));
 const STUDY_PAY_FACTOR = { Full: 0, Half: 0.5, None: 1 }; // share of daily pay deducted
 const LEAVE_DAILY_DIVISOR = 30; // daily rate = monthly gross ÷ 30
+
+async function pgFetchAll(path, token, pageSize = 1000) {
+  const out = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await pgFetch(`${path}${path.includes("?") ? "&" : "?"}limit=${pageSize}&offset=${offset}`, token);
+    out.push(...(page || []));
+    if (!page || page.length < pageSize) break;
+  }
+  return out;
+}
+async function fetchTermFees(token) {
+  const rows = await pgFetchAll("term_fee_structure?select=*&order=class,year,term", token);
+  return Object.fromEntries(rows.map((r) => [termFeeKey(r.class, r.year, r.term), Number(r.amount)]));
+}
+function mapChargeRow(r) {
+  return { id: r.id, studentId: r.student_id, year: r.year, term: r.term, description: r.description || "", amount: Number(r.amount) };
+}
+async function fetchStudentCharges(token) {
+  const rows = await pgFetchAll("student_charges?select=*&order=created_at,id", token);
+  return rows.map(mapChargeRow);
+}
 
 function mapLeaveRow(r) {
   return { id: r.id, staffId: r.staff_id, type: r.leave_type, startDate: r.start_date, endDate: r.end_date, days: r.days, studyPay: r.study_pay || "", reason: r.reason || "", status: r.status, decidedAt: r.decided_at, createdAt: r.created_at };
