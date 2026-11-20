@@ -406,3 +406,24 @@ ALTER TABLE public.school_settings ADD COLUMN IF NOT EXISTS fee_cutover_date dat
 -- their data, plus the class they left from and when.
 ALTER TABLE public.students ADD COLUMN IF NOT EXISTS left_date date;
 ALTER TABLE public.students ADD COLUMN IF NOT EXISTS left_class text;
+
+-- Boarding: houses (with a boarding master and optional assistant), students
+-- placed in a house are boarders, and boarders can carry a boarding fee
+-- inside their term bill.
+CREATE TABLE IF NOT EXISTS public.boarding_houses (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  house_type text not null default 'Mixed',
+  capacity integer,
+  master_id uuid references public.staff_profiles(id) on delete set null,
+  assistant_id uuid references public.staff_profiles(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+ALTER TABLE public.boarding_houses ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "boarding_houses_admin_all" ON public.boarding_houses FOR ALL
+  USING (public.is_school_admin()) WITH CHECK (public.is_school_admin());
+CREATE POLICY "boarding_houses_staff_view" ON public.boarding_houses FOR SELECT
+  USING (exists (select 1 from staff_profiles sp where sp.id = auth.uid()));
+ALTER TABLE public.students ADD COLUMN IF NOT EXISTS house_id uuid REFERENCES public.boarding_houses(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS students_house_idx ON public.students (house_id);
+ALTER TABLE public.student_charges ADD COLUMN IF NOT EXISTS boarding_amount numeric NOT NULL DEFAULT 0;
