@@ -6,7 +6,7 @@ import {
   BadgeCheck, AlertTriangle, LogOut, Settings2, ImagePlus, MapPin, Compass,
   ClipboardList, Lock, Sliders, Printer, Eye, Download, Award, CalendarDays, Bell, Send, UserRound,
   UserCheck, LogIn, DoorOpen, CalendarRange, Wand2, RefreshCw, BookOpen, ExternalLink,
-  Contact, Library, BookPlus, Undo2, Paperclip
+  Contact, Library, BookPlus, Undo2, Paperclip, Home
 } from "lucide-react";
 
 /* ---------------------------------------------------------------------- *
@@ -195,7 +195,7 @@ async function fetchSchoolData(token) {
     students: students.map((s) => ({
       id: s.id, admissionNo: s.admission_no, name: s.name, gender: s.gender, class: s.class,
       guardian: s.guardian, relationship: s.relationship, phone: s.phone, enrolled: s.enrolled, status: s.status,
-      photoUrl: s.photo_url, leftDate: s.left_date || "", leftClass: s.left_class || "",
+      photoUrl: s.photo_url, leftDate: s.left_date || "", leftClass: s.left_class || "", houseId: s.house_id || null,
     })),
     grades: grades.map((g) => ({ studentId: g.student_id, subject: g.subject, term: g.term, score: g.score })),
     attendance: attendance.map((a) => ({ date: a.date, studentId: a.student_id, status: a.status })),
@@ -354,6 +354,8 @@ function termForDate(d = new Date()) {
   return { term: 1, year: y + 1 };
 }
 const termFeeKey = (cls, year, term) => `${cls}|${year}|${term}`;
+// The optional boarding fee is stored with the term fees under this key.
+const BOARDING_KEY = "__boarding__";
 
 // One student's School Fees position. Before billing by term is started
 // (no cutover date) this is the old single-fee calculation, so nothing
@@ -377,7 +379,7 @@ function schoolFeesSummary(student, env) {
   const terms = bills.map((c) => {
     const applied = Math.min(c.amount, Math.max(0, pool));
     pool -= applied;
-    return { id: c.id, year: c.year, term: c.term, description: c.description, amount: c.amount, paid: applied, balance: c.amount - applied };
+    return { id: c.id, year: c.year, term: c.term, description: c.description, amount: c.amount, boardingAmount: c.boardingAmount || 0, paid: applied, balance: c.amount - applied };
   });
   const due = bills.reduce((s, c) => s + c.amount, 0);
   return { billing: true, due, paid: poolTotal, balance: due - poolTotal, credit: Math.max(0, poolTotal - due), terms };
@@ -392,16 +394,24 @@ function feePaidFor(student, acct, env) {
 }
 // Who would be billed for a term, and who can't be (no fee set for their class).
 function planTermBilling(students, termFees, studentCharges, year, term) {
-  const billed = new Set(studentCharges.filter((c) => c.year === Number(year) && c.term === Number(term)).map((c) => c.studentId));
-  const toBill = [], noFee = new Set();
+  const boardingFee = termFees[termFeeKey(BOARDING_KEY, year, term)] || 0;
+  const charged = new Map(studentCharges.filter((c) => c.year === Number(year) && c.term === Number(term)).map((c) => [c.studentId, c]));
+  const toBill = [], topUps = [], noFee = new Set();
   let already = 0;
-  students.forEach((s) => {
-    if (billed.has(s.id)) { already++; return; }
-    const amount = termFees[termFeeKey(s.class, year, term)];
-    if (!amount) { noFee.add(s.class); return; }
-    toBill.push({ student: s, amount });
+  students.forEach((st) => {
+    const existing = charged.get(st.id);
+    if (existing) {
+      already++;
+      // A boarder billed before the boarding fee existed / before being placed in a house.
+      if (st.houseId && boardingFee > 0 && !(existing.boardingAmount > 0)) topUps.push({ student: st, charge: existing, boarding: boardingFee });
+      return;
+    }
+    const tuition = termFees[termFeeKey(st.class, year, term)];
+    if (!tuition) { noFee.add(st.class); return; }
+    const boarding = st.houseId ? boardingFee : 0;
+    toBill.push({ student: st, amount: tuition + boarding, boarding });
   });
-  return { toBill, already, noFeeClasses: [...noFee] };
+  return { toBill, already, noFeeClasses: [...noFee], topUps, boardingFee };
 }
 
 // What's actually available to spend from an account: money collected,
@@ -1135,6 +1145,7 @@ export default function App() {
   const [staffDocuments, setStaffDocuments] = useState([]);
   const [mpesaTransactions, setMpesaTransactions] = useState([]);
   const [termFees, setTermFees] = useState({});
+  const [houses, setHouses] = useState([]);
   const [studentCharges, setStudentCharges] = useState([]);
   const [view, setView] = useState("dashboard");
   const [attendanceLanding, setAttendanceLanding] = useState("students");
@@ -1167,7 +1178,7 @@ export default function App() {
     setDataLoading(true);
     setDataError("");
     try {
-      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows, mpesaRows, termFeeMap, chargeRows] = await Promise.all([
+      const [school, staffRows, classNames, subjectNames, settings, examNames, eventRows, levels, classGrading, notificationRows, myAttendance, ttAssignments, ttSettings, ttEntries, staffPay, payrollCfg, payslipRows, expenditureRows, loanRows, smsMessageRows, visitorRows, appointmentRows, libraryBookRows, bookIssueRows, leaveRows, staffDocRows, mpesaRows, termFeeMap, chargeRows, houseRows] = await Promise.all([
         fetchSchoolData(token), fetchStaffDirectory(token), fetchClasses(token), fetchSubjects(token), fetchSchoolSettings(token),
         fetchExams(token), fetchEvents(token), fetchGradingLevels(token), fetchClassGradingAssignment(token), fetchNotifications(token, user),
         fetchOwnTodayAttendance(token, user.id),
@@ -1185,6 +1196,7 @@ export default function App() {
         fetchMpesaTransactions(token).catch(() => []),
         fetchTermFees(token).catch(() => ({})),
         fetchStudentCharges(token).catch(() => []),
+        fetchBoardingHouses(token).catch(() => []),
       ]);
       setStudents(school.students);
       setGrades(school.grades);
@@ -1204,6 +1216,7 @@ export default function App() {
       setMpesaTransactions(mpesaRows);
       setTermFees(termFeeMap);
       setStudentCharges(chargeRows);
+      setHouses(houseRows);
       setStaff(staffRows);
       setClasses(classNames.length ? classNames : FALLBACK_CLASSES);
       setSubjects(subjectNames.length ? subjectNames : FALLBACK_SUBJECTS);
@@ -1287,13 +1300,13 @@ export default function App() {
       body: {
         admission_no: student.admissionNo, name: student.name, gender: student.gender, class: student.class,
         guardian: student.guardian, relationship: student.relationship, phone: student.phone,
-        enrolled: student.enrolled, status: student.status, photo_url: student.photoUrl || null,
+        enrolled: student.enrolled, status: student.status, photo_url: student.photoUrl || null, house_id: student.houseId || null,
       },
     });
     setStudents((prev) => [...prev, {
       id: row.id, admissionNo: row.admission_no, name: row.name, gender: row.gender, class: row.class,
       guardian: row.guardian, relationship: row.relationship, phone: row.phone, enrolled: row.enrolled, status: row.status,
-      photoUrl: row.photo_url,
+      photoUrl: row.photo_url, houseId: row.house_id || null,
     }]);
   };
 
@@ -1321,6 +1334,7 @@ export default function App() {
         name: patch.name, gender: patch.gender, class: patch.class,
         guardian: patch.guardian, relationship: patch.relationship, phone: patch.phone,
         status: patch.status, photo_url: patch.photoUrl || null,
+        ...("houseId" in patch ? { house_id: patch.houseId || null } : {}),
       },
       prefer: "return=minimal",
     });
@@ -1339,10 +1353,10 @@ export default function App() {
     students.filter((s) => ids.includes(s.id)).forEach((s) => { (byClass[s.class] = byClass[s.class] || []).push(s.id); });
     for (const [cls, classIds] of Object.entries(byClass)) {
       await pgFetch(`students?id=in.(${classIds.join(",")})`, authedUser.accessToken, {
-        method: "PATCH", body: { status: "Alumni", left_date: leftDate, left_class: cls }, prefer: "return=minimal",
+        method: "PATCH", body: { status: "Alumni", left_date: leftDate, left_class: cls, house_id: null }, prefer: "return=minimal",
       });
     }
-    setStudents((prev) => prev.map((s) => (ids.includes(s.id) ? { ...s, status: "Alumni", leftDate, leftClass: s.class } : s)));
+    setStudents((prev) => prev.map((s) => (ids.includes(s.id) ? { ...s, status: "Alumni", leftDate, leftClass: s.class, houseId: null } : s)));
   };
   const restoreAlumnus = async (id, className) => {
     await pgFetch(`students?id=eq.${id}`, authedUser.accessToken, {
@@ -1534,6 +1548,26 @@ export default function App() {
     setPayslips((prev) => [slip, ...prev.filter((p) => !(p.staffId === slip.staffId && p.month === month && p.year === year))]);
     return slip;
   };
+  // ---- Boarding ----
+  const isHouseMaster = houses.some((h) => h.masterId === authedUser?.id || h.assistantId === authedUser?.id);
+  const houseBody = (h) => ({ name: h.name, house_type: h.type, capacity: h.capacity, master_id: h.masterId, assistant_id: h.assistantId });
+  const addHouse = async (h) => {
+    const [row] = await pgFetch("boarding_houses", authedUser.accessToken, { method: "POST", body: houseBody(h) });
+    setHouses((prev) => [...prev, mapHouseRow(row)].sort((a, b) => a.name.localeCompare(b.name)));
+  };
+  const updateHouse = async (id, h) => {
+    const [row] = await pgFetch(`boarding_houses?id=eq.${id}`, authedUser.accessToken, { method: "PATCH", body: houseBody(h) });
+    setHouses((prev) => prev.map((x) => (x.id === id ? mapHouseRow(row) : x)).sort((a, b) => a.name.localeCompare(b.name)));
+  };
+  const deleteHouse = async (id) => {
+    await pgFetch(`boarding_houses?id=eq.${id}`, authedUser.accessToken, { method: "DELETE", prefer: "return=minimal" });
+    setHouses((prev) => prev.filter((h) => h.id !== id));
+    setStudents((prev) => prev.map((s) => (s.houseId === id ? { ...s, houseId: null } : s)));
+  };
+  const assignHouse = async (studentId, houseId) => {
+    await pgFetch(`students?id=eq.${studentId}`, authedUser.accessToken, { method: "PATCH", body: { house_id: houseId }, prefer: "return=minimal" });
+    setStudents((prev) => prev.map((s) => (s.id === studentId ? { ...s, houseId } : s)));
+  };
   // ---- Fees by term ----
   const feeEnv = { feeStructure, payments, studentCharges, cutoverDate: schoolSettings?.feeCutoverDate || "" };
   const insertCharges = async (rows) => {
@@ -1570,12 +1604,22 @@ export default function App() {
   };
   const billTerm = async (year, term, setCurrent) => {
     const plan = planTermBilling(activeStudents, termFees, studentCharges, year, term);
-    const added = await insertCharges(plan.toBill.map(({ student, amount }) => ({ student_id: student.id, year: Number(year), term: Number(term), description: `Term ${term} ${year} fees`, amount, created_by: authedUser.id })));
+    const added = await insertCharges(plan.toBill.map(({ student, amount, boarding }) => ({ student_id: student.id, year: Number(year), term: Number(term), description: boarding > 0 ? `Term ${term} ${year} fees (incl. boarding)` : `Term ${term} ${year} fees`, amount, boarding_amount: boarding, created_by: authedUser.id })));
     if (setCurrent) {
       await pgFetch("school_settings?id=eq.1", authedUser.accessToken, { method: "PATCH", body: { current_term: `Term ${term}` }, prefer: "return=minimal" });
       setSchoolSettings((prev) => ({ ...prev, currentTerm: `Term ${term}` }));
     }
     return { billed: added, already: plan.already, noFeeClasses: plan.noFeeClasses };
+  };
+  // Adds the boarding fee to boarders who were billed for the term before
+  // they were placed in a house (or before the boarding fee was set).
+  const applyBoardingTopUps = async (year, term) => {
+    const plan = planTermBilling(activeStudents, termFees, studentCharges, year, term);
+    for (const t of plan.topUps) {
+      await pgFetch(`student_charges?id=eq.${t.charge.id}`, authedUser.accessToken, { method: "PATCH", body: { amount: t.charge.amount + t.boarding, boarding_amount: t.boarding }, prefer: "return=minimal" });
+    }
+    setStudentCharges((prev) => prev.map((c) => { const t = plan.topUps.find((x) => x.charge.id === c.id); return t ? { ...c, amount: c.amount + t.boarding, boardingAmount: t.boarding } : c; }));
+    return plan.topUps.length;
   };
   const updateBroughtForward = async (studentId, amount) => {
     const existing = studentCharges.find((c) => c.studentId === studentId && c.term === 0);
@@ -2013,7 +2057,8 @@ export default function App() {
     leaveRequests, addLeave, decideLeave, deleteLeave,
     staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument,
     mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored,
-    termFees, studentCharges, feeEnv, saveTermFee, startTermBilling, billTerm, updateBroughtForward,
+    termFees, studentCharges, feeEnv, saveTermFee, startTermBilling, billTerm, applyBoardingTopUps, updateBroughtForward,
+    houses, isHouseMaster, addHouse, updateHouse, deleteHouse, assignHouse,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
     appointments, addAppointment, deleteAppointment,
@@ -2074,7 +2119,7 @@ export default function App() {
       <div className="flex min-h-screen">
         <button type="button" aria-label="Open menu" className="sidebar-menu-button focus-ring" onClick={() => setMenuOpen(true)} style={{ width: 42, height: 42, borderRadius: 10, border: `1px solid ${LINE}`, background: PANEL, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}>☰</button>
         <div className={`sidebar-backdrop ${menuOpen ? "open" : ""}`} onClick={() => setMenuOpen(false)} />
-        <Sidebar view={view} setView={(v) => { setView(v); setMenuOpen(false); }} role={authedUser.role} menuOpen={menuOpen} />
+        <Sidebar view={view} setView={(v) => { setView(v); setMenuOpen(false); }} role={authedUser.role} menuOpen={menuOpen} isHouseMaster={isHouseMaster} />
         <div className="flex-1 flex flex-col min-w-0">
           <TopBar authedUser={authedUser} schoolSettings={schoolSettings} classCount={classes.length} myAttendanceToday={myAttendanceToday} clockArrival={clockArrival} clockDeparture={clockDeparture} onLogout={() => {
             fetch(`${SUPABASE_URL}/auth/v1/logout`, {
@@ -2115,6 +2160,7 @@ export default function App() {
                 {view === "dashboard" && authedUser?.role === "Receptionist" && <ReceptionistDashboard {...ctx} />}
                 {view === "dashboard" && authedUser?.role === "Librarian" && <LibrarianDashboard {...ctx} />}
                 {view === "students" && isAdmin && <StudentsView {...ctx} />}
+                {view === "boarding" && (isAdmin || isHouseMaster) && <BoardingView {...ctx} />}
                 {view === "alumni" && (isAdmin || authedUser?.role === "Clerk") && <AlumniView {...ctx} />}
                 {view === "attendance" && <AttendanceView {...ctx} />}
                 {view === "grades" && <GradesView {...ctx} />}
@@ -2384,10 +2430,11 @@ function ResetPasswordScreen({ accessToken, onDone }) {
 /* ---------------------------------------------------------------------- *
  *  SIDEBAR / TOPBAR / TOAST
  * ---------------------------------------------------------------------- */
-function Sidebar({ view, setView, role, menuOpen }) {
+function Sidebar({ view, setView, role, menuOpen, isHouseMaster }) {
   const allItems = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, roles: [...ADMIN_ROLES, "Class Teacher", "Subject Teacher", "Clerk", "Receptionist", "Librarian"] },
     { id: "students", label: "Students", icon: Users, roles: ADMIN_ROLES },
+    { id: "boarding", label: "Boarding", icon: Home, roles: ADMIN_ROLES },
     { id: "alumni", label: "Alumni", icon: GraduationCap, roles: [...ADMIN_ROLES, "Clerk"] },
     { id: "attendance", label: "Attendance", icon: CalendarCheck, roles: [...ADMIN_ROLES, "Class Teacher"] },
     { id: "grades", label: "Grades", icon: GraduationCap, roles: [...ADMIN_ROLES, "Class Teacher"] },
@@ -2405,7 +2452,7 @@ function Sidebar({ view, setView, role, menuOpen }) {
     { id: "library", label: "Library", icon: Library, roles: ["Admin", "Librarian"] },
     { id: "setup", label: "School Setup", icon: Settings2, roles: ["Admin"] },
   ];
-  const items = allItems.filter((it) => it.roles.includes(role));
+  const items = allItems.filter((it) => it.roles.includes(role) || (it.id === "boarding" && isHouseMaster));
   return (
     <aside style={{ background: RAIL, width: 88, overflowY: "auto", WebkitOverflowScrolling: "touch" }} className={`sidebar-drawer ${menuOpen ? "open" : ""} flex flex-col items-center py-5 shrink-0`}>
       <div style={{ width: 40, height: 40, borderRadius: 10, background: ACCENT }} className="flex items-center justify-center mb-8">
@@ -3130,7 +3177,7 @@ function StudentsView(ctx) {
       </div>
 
       {selected && <StudentProfile student={selected} onClose={() => setSelectedId(null)} {...ctx} />}
-      {addOpen && <AddStudentModal classes={classes} uploadPhoto={ctx.uploadPhoto} onClose={() => setAddOpen(false)} onAdd={async (s) => {
+      {addOpen && <AddStudentModal classes={classes} houses={ctx.houses} uploadPhoto={ctx.uploadPhoto} onClose={() => setAddOpen(false)} onAdd={async (s) => {
         try {
           await addStudent(s);
           showToast(`${s.name} added to ${s.class}`);
@@ -3161,6 +3208,184 @@ function StudentsView(ctx) {
 // Bulk-moves every student in one class into another — the end-of-year
 // promotion workflow (Grade 3 → Grade 4 for everyone at once), rather than
 // editing each student's class individually.
+/* ---------------------------------------------------------------------- *
+ *  BOARDING — houses (each with a boarding master and optional assistant)
+ *  and which students board in them. A student placed in a house is a
+ *  boarder; no house means a day scholar. Boarders can carry the optional
+ *  boarding fee in their term bill (see Finance → Term Billing).
+ * ---------------------------------------------------------------------- */
+function mapHouseRow(r) {
+  return { id: r.id, name: r.name, type: r.house_type || "Mixed", capacity: r.capacity ?? null, masterId: r.master_id || null, assistantId: r.assistant_id || null };
+}
+async function fetchBoardingHouses(token) {
+  const rows = await pgFetch("boarding_houses?select=*&order=name", token);
+  return rows.map(mapHouseRow);
+}
+
+function BoardingView({ houses, students, staff, classes, isAdmin, authedUser, addHouse, updateHouse, deleteHouse, assignHouse, showToast }) {
+  const [tab, setTab] = useState("houses");
+  const blank = { name: "", type: "Mixed", capacity: "", masterId: "", assistantId: "" };
+  const [form, setForm] = useState(blank);
+  const [editingId, setEditingId] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [openHouse, setOpenHouse] = useState(null);
+  const [houseFilter, setHouseFilter] = useState("All");
+  const [classFilter, setClassFilter] = useState("All");
+  const [q, setQ] = useState("");
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const myHouses = isAdmin ? houses : houses.filter((h) => h.masterId === authedUser.id || h.assistantId === authedUser.id);
+  const staffName = (id) => staff.find((s) => s.id === id)?.name || "—";
+  const boardersOf = (houseId) => students.filter((s) => s.houseId === houseId);
+  const totalBoarders = students.filter((s) => s.houseId && myHouses.some((h) => h.id === s.houseId)).length;
+
+  const startEdit = (h) => { setEditingId(h.id); setForm({ name: h.name, type: h.type, capacity: h.capacity ?? "", masterId: h.masterId || "", assistantId: h.assistantId || "" }); window.scrollTo?.({ top: 0, behavior: "smooth" }); };
+  const cancelEdit = () => { setEditingId(null); setForm(blank); };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!form.name.trim()) { showToast("Give the house a name"); return; }
+    if (houses.some((h) => h.id !== editingId && h.name.toLowerCase() === form.name.trim().toLowerCase())) { showToast("A house with that name already exists"); return; }
+    setSaving(true);
+    try {
+      const payload = { name: form.name.trim(), type: form.type, capacity: form.capacity === "" ? null : Number(form.capacity), masterId: form.masterId || null, assistantId: form.assistantId || null };
+      if (editingId) { await updateHouse(editingId, payload); showToast("House updated"); }
+      else { await addHouse(payload); showToast(`Added ${payload.name}`); }
+      cancelEdit();
+    } catch (err) { showToast(err.message || "Couldn't save the house"); }
+    finally { setSaving(false); }
+  };
+
+  const remove = async (h) => {
+    const n = boardersOf(h.id).length;
+    if (!window.confirm(`Delete ${h.name}?${n ? ` Its ${n} boarder${n === 1 ? "" : "s"} will become day scholars (their records are kept).` : ""}`)) return;
+    try { await deleteHouse(h.id); showToast(`${h.name} deleted`); } catch (err) { showToast(err.message || "Couldn't delete"); }
+  };
+
+  const assign = async (st, houseId) => {
+    const house = houses.find((h) => h.id === houseId);
+    if (house) {
+      if (house.capacity && boardersOf(house.id).length >= house.capacity && st.houseId !== house.id && !window.confirm(`${house.name} is already full (${house.capacity}). Add ${st.name} anyway?`)) return;
+      if (((house.type === "Boys" && st.gender === "F") || (house.type === "Girls" && st.gender === "M")) && !window.confirm(`${house.name} is a ${house.type.toLowerCase()}' house. Place ${st.name} there anyway?`)) return;
+    }
+    try { await assignHouse(st.id, houseId || null); showToast(houseId ? `${st.name} placed in ${house.name}` : `${st.name} is now a day scholar`); }
+    catch (err) { showToast(err.message || "Couldn't update"); }
+  };
+
+  const ql = q.trim().toLowerCase();
+  const visibleHouseIds = new Set(myHouses.map((h) => h.id));
+  const rows = students
+    .filter((s) => (isAdmin || (s.houseId && visibleHouseIds.has(s.houseId))))
+    .filter((s) => houseFilter === "All" || (houseFilter === "none" ? !s.houseId : s.houseId === houseFilter))
+    .filter((s) => classFilter === "All" || s.class === classFilter)
+    .filter((s) => !ql || s.name.toLowerCase().includes(ql) || String(s.admissionNo || "").toLowerCase().includes(ql))
+    .sort((a, b) => a.class.localeCompare(b.class) || a.name.localeCompare(b.name));
+
+  const typeBadge = (t) => ({ Boys: { bg: "#EAF3FF", fg: "#245B91" }, Girls: { bg: "#FBEAF3", fg: "#A12C6B" }, Mixed: { bg: "#F1EEFB", fg: "#5B4FA1" } }[t] || { bg: "#EEE", fg: "#555" });
+
+  return (
+    <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
+      <h2 style={{ fontFamily: DISPLAY_FONT, fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Boarding</h2>
+      <p style={{ fontSize: 12.5, color: "#7A7568", marginBottom: 14 }}>{isAdmin ? "Houses, their boarding masters, and which students board. A student with no house is a day scholar." : "Your house and its boarders."}</p>
+
+      <div className="flex gap-4 mb-4" style={{ borderBottom: `1px solid ${LINE}` }}>
+        {[["houses", "Houses"], ["boarders", "Boarders"]].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)} className="focus-ring" style={{ padding: "8px 4px", background: "none", border: "none", borderBottom: tab === id ? `2px solid ${ACCENT}` : "2px solid transparent", fontSize: 13.5, fontWeight: 700, color: tab === id ? INK : "#9a9484", cursor: "pointer" }}>{label}</button>
+        ))}
+        <span style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12.5, color: "#6b6656" }}>{totalBoarders} boarder{totalBoarders === 1 ? "" : "s"}</span>
+      </div>
+
+      {tab === "houses" && (
+        <>
+          {isAdmin && (
+            <form onSubmit={submit} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
+              <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>{editingId ? "Edit house" : "Add a house"}</h3>
+              <div className="flex items-end gap-3 flex-wrap">
+                <Field label="House name"><input value={form.name} onChange={set("name")} placeholder="e.g. Kilimanjaro" className="focus-ring" style={{ ...inputStyle, width: 170 }} /></Field>
+                <Field label="For"><select value={form.type} onChange={set("type")} className="focus-ring" style={{ ...inputStyle, width: 110 }}><option>Boys</option><option>Girls</option><option>Mixed</option></select></Field>
+                <Field label="Capacity"><input type="number" min={1} value={form.capacity} onChange={set("capacity")} placeholder="optional" className="focus-ring" style={{ ...inputStyle, width: 100 }} /></Field>
+                <Field label="Boarding master"><select value={form.masterId} onChange={set("masterId")} className="focus-ring" style={{ ...inputStyle, width: 190 }}><option value="">Not assigned</option>{staff.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+                <Field label="Assistant (optional)"><select value={form.assistantId} onChange={set("assistantId")} className="focus-ring" style={{ ...inputStyle, width: 190 }}><option value="">None</option>{staff.filter((s) => s.id !== form.masterId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+                <button type="submit" disabled={saving} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer" }}>{saving ? "Saving…" : editingId ? "Save" : "Add House"}</button>
+                {editingId && <button type="button" onClick={cancelEdit} className="focus-ring" style={{ padding: "9px 14px", borderRadius: 9, border: `1px solid ${LINE}`, background: "#fff", fontWeight: 600, fontSize: 13, cursor: "pointer" }}>Cancel</button>}
+              </div>
+            </form>
+          )}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
+            {myHouses.map((h) => {
+              const bs = boardersOf(h.id);
+              const tb = typeBadge(h.type);
+              const open = openHouse === h.id;
+              return (
+                <div key={h.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 }}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span style={{ fontWeight: 700, fontSize: 15 }}>{h.name}</span>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, background: tb.bg, color: tb.fg, borderRadius: 999, padding: "3px 9px" }}>{h.type.toUpperCase()}</span>
+                  </div>
+                  <div style={{ fontFamily: MONO_FONT, fontSize: 22, fontWeight: 700 }}>{bs.length}{h.capacity ? <span style={{ fontSize: 13, color: "#8a8474", fontWeight: 400 }}> / {h.capacity}</span> : null}</div>
+                  <div style={{ fontSize: 11, color: "#8a8474", marginBottom: 8 }}>boarders{h.capacity && bs.length >= h.capacity ? " · FULL" : ""}</div>
+                  <div style={{ fontSize: 12.5, color: "#4a4536", lineHeight: 1.6 }}>
+                    <div><b>Master:</b> {h.masterId ? staffName(h.masterId) : <span style={{ color: "#a1442c" }}>not assigned</span>}</div>
+                    {h.assistantId && <div><b>Assistant:</b> {staffName(h.assistantId)}</div>}
+                  </div>
+                  <div className="flex items-center gap-2" style={{ marginTop: 10 }}>
+                    <button onClick={() => setOpenHouse(open ? null : h.id)} className="focus-ring" style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${LINE}`, background: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>{open ? "Hide boarders" : "View boarders"}</button>
+                    {isAdmin && <button onClick={() => startEdit(h)} className="focus-ring" title="Edit" style={{ background: "none", border: "none", cursor: "pointer", color: "#5b5747" }}><Pencil size={14} /></button>}
+                    {isAdmin && <button onClick={() => remove(h)} className="focus-ring" title="Delete" style={{ background: "none", border: "none", cursor: "pointer", color: "#a1442c" }}><Trash2 size={14} /></button>}
+                  </div>
+                  {open && (
+                    <div style={{ marginTop: 10, borderTop: `1px solid ${LINE}`, paddingTop: 8, maxHeight: 220, overflowY: "auto" }}>
+                      {bs.length === 0 ? <div style={{ fontSize: 12, color: "#a39c86" }}>No boarders yet.</div> : [...bs].sort((a, b) => a.name.localeCompare(b.name)).map((s) => (
+                        <div key={s.id} className="flex items-center justify-between" style={{ fontSize: 12.5, padding: "3px 0" }}><span>{s.name}</span><span style={{ color: "#6b6656" }}>{s.class}</span></div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {myHouses.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>{isAdmin ? "No houses yet — add the first one above." : "You haven't been assigned to a house."}</div>}
+        </>
+      )}
+
+      {tab === "boarders" && (
+        <>
+          <div className="flex items-center gap-3 flex-wrap mb-3">
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or admission no." className="focus-ring" style={{ ...inputStyle, width: 250 }} />
+            <select value={houseFilter} onChange={(e) => setHouseFilter(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 180 }}>
+              <option value="All">All students</option>{isAdmin && <option value="none">Day scholars only</option>}
+              {myHouses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+            </select>
+            <select value={classFilter} onChange={(e) => setClassFilter(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 150 }}>
+              <option value="All">All classes</option>{classes.map((c) => <option key={c}>{c}</option>)}
+            </select>
+            <span style={{ marginLeft: "auto", fontSize: 12.5, color: "#6b6656" }}>{rows.length} student{rows.length === 1 ? "" : "s"}</span>
+          </div>
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 0.5fr 1.4fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>
+              <span>Student</span><span>Class</span><span>Sex</span><span>House</span>
+            </div>
+            {rows.map((s) => (
+              <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 0.5fr 1.4fr", padding: "7px 16px", fontSize: 13, borderTop: `1px solid ${LINE}`, alignItems: "center" }}>
+                <span style={{ fontWeight: 600 }}>{s.name}</span>
+                <span>{s.class}</span>
+                <span>{s.gender}</span>
+                {isAdmin ? (
+                  <select value={s.houseId || ""} onChange={(e) => assign(s, e.target.value)} className="focus-ring" style={{ ...inputStyle, padding: "5px 8px", width: "100%", background: s.houseId ? "#F4F8FD" : "#fff" }}>
+                    <option value="">Day scholar</option>
+                    {houses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+                  </select>
+                ) : <span>{houses.find((h) => h.id === s.houseId)?.name || "—"}</span>}
+              </div>
+            ))}
+            {rows.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No students match.</div>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Confirms moving one student out of the school, with the date they left.
 function MoveToAlumniModal({ student, onConfirm, onClose }) {
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
@@ -3321,7 +3546,7 @@ function PromoteClassModal({ students, classes, onClose, onPromote }) {
   );
 }
 
-function StudentProfile({ student, onClose, grades, attendance, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings, feeEnv, graduateStudents }) {
+function StudentProfile({ student, onClose, grades, attendance, payments, recordPaymentBatch, deletePayment, showToast, feeStructure, otherFeeStructure, schoolDays, subjects, deleteStudent, updateStudent, classes, uploadPhoto, schoolSettings, feeEnv, graduateStudents, houses }) {
   const [tab, setTab] = useState("overview");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -3457,7 +3682,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
       )}
       {editOpen && (
         <EditStudentModal
-          student={student} classes={classes} uploadPhoto={uploadPhoto}
+          student={student} classes={classes} houses={houses} uploadPhoto={uploadPhoto}
           onClose={() => setEditOpen(false)}
           onSave={async (patch) => {
             try {
@@ -3519,7 +3744,7 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
           <div style={{ padding: "7px 10px", fontSize: 10.5, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>Fees by term (oldest paid first)</div>
           {feeTerms.map((t) => (
             <div key={t.id} className="flex items-center justify-between" style={{ padding: "6px 10px", fontSize: 12, borderTop: `1px solid ${LINE}` }}>
-              <span style={{ fontWeight: 600 }}>{t.term === 0 ? "Brought forward" : `Term ${t.term} ${t.year}`}</span>
+              <span style={{ fontWeight: 600 }}>{t.term === 0 ? "Brought forward" : `Term ${t.term} ${t.year}`}{t.boardingAmount > 0 && <span style={{ display: "block", fontSize: 10.5, fontWeight: 400, color: "#6b6656" }}>incl. boarding {money(t.boardingAmount)}</span>}</span>
               <span style={{ fontFamily: MONO_FONT, color: "#6b6656" }}>{money(t.amount)}</span>
               <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: t.balance > 0 ? "#a1442c" : "#2f6f4a" }}>{t.balance > 0 ? `${money(t.balance)} owing` : "Paid"}</span>
             </div>
@@ -3605,8 +3830,8 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
   );
 }
 
-function AddStudentModal({ onClose, onAdd, classes, uploadPhoto }) {
-  const [form, setForm] = useState({ name: "", gender: "M", class: classes[0], guardian: "", relationship: "Mother", phone: "" });
+function AddStudentModal({ onClose, onAdd, classes, uploadPhoto, houses = [] }) {
+  const [form, setForm] = useState({ name: "", gender: "M", class: classes[0], guardian: "", relationship: "Mother", phone: "", houseId: "" });
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -3655,6 +3880,7 @@ function AddStudentModal({ onClose, onAdd, classes, uploadPhoto }) {
             <Field label="Gender"><select value={form.gender} onChange={set("gender")} className="focus-ring" style={inputStyle}><option value="M">Male</option><option value="F">Female</option></select></Field>
             <Field label="Class"><select value={form.class} onChange={set("class")} className="focus-ring" style={inputStyle}>{classes.map((c) => <option key={c}>{c}</option>)}</select></Field>
           </div>
+          {houses.length > 0 && <Field label="Boarding house (optional)"><select value={form.houseId} onChange={set("houseId")} className="focus-ring" style={inputStyle}><option value="">Day scholar (not boarding)</option>{houses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>}
           <Field label="Guardian name"><input required value={form.guardian} onChange={set("guardian")} className="focus-ring" style={inputStyle} /></Field>
           <div className="flex gap-3">
             <Field label="Relationship"><select value={form.relationship} onChange={set("relationship")} className="focus-ring" style={inputStyle}><option>Mother</option><option>Father</option><option>Guardian</option></select></Field>
@@ -3668,8 +3894,9 @@ function AddStudentModal({ onClose, onAdd, classes, uploadPhoto }) {
   );
 }
 
-function EditStudentModal({ student, onClose, onSave, classes, uploadPhoto }) {
+function EditStudentModal({ student, onClose, onSave, classes, uploadPhoto, houses = [] }) {
   const [form, setForm] = useState({
+    houseId: student.houseId || "",
     name: student.name, gender: student.gender, class: student.class,
     guardian: student.guardian, relationship: student.relationship, phone: student.phone || "",
     status: student.status, photoUrl: student.photoUrl || "",
@@ -3723,6 +3950,7 @@ function EditStudentModal({ student, onClose, onSave, classes, uploadPhoto }) {
             <Field label="Phone"><input value={form.phone} onChange={set("phone")} placeholder="07…" className="focus-ring" style={inputStyle} /></Field>
           </div>
           <Field label="Status"><select value={form.status} onChange={set("status")} className="focus-ring" style={inputStyle}><option>Active</option><option>Inactive</option><option>Transferred</option><option>Graduated</option></select></Field>
+          {houses.length > 0 && <Field label="Boarding house"><select value={form.houseId} onChange={set("houseId")} className="focus-ring" style={inputStyle}><option value="">Day scholar (not boarding)</option>{houses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select></Field>}
         </div>
         {error && <div className="flex items-start gap-1.5" style={{ color: "#a1442c", fontSize: 12, marginTop: 10 }}><AlertTriangle size={13} style={{ marginTop: 1, flexShrink: 0 }} /> {error}</div>}
         <button type="button" onClick={submit} disabled={saving} className="focus-ring" style={{ width: "100%", marginTop: 18, padding: "10px 0", borderRadius: 9, border: "none", background: RAIL, color: "#fff", fontWeight: 700, fontSize: 13, cursor: saving ? "wait" : "pointer", opacity: saving ? 0.7 : 1 }}>{saving ? "Saving…" : "Save Changes"}</button>
@@ -4506,7 +4734,7 @@ function MpesaTab({ students, allStudents, payments, feeStructure, otherFeeStruc
 
 // Fees by term: set each class's fee per term, bill a term, and review
 // brought-forward balances. Billing is switched on once, by "Start term billing".
-function TermBillingTab({ students, allStudents, classes, termFees, studentCharges, feeEnv, schoolSettings, feeStructure, payments, saveTermFee, startTermBilling, billTerm, updateBroughtForward, showToast }) {
+function TermBillingTab({ students, allStudents, classes, termFees, studentCharges, feeEnv, schoolSettings, feeStructure, payments, saveTermFee, startTermBilling, billTerm, applyBoardingTopUps, updateBroughtForward, showToast }) {
   const cutover = schoolSettings?.feeCutoverDate || "";
   const suggested = termForDate();
   const [year, setYear] = useState(suggested.year);
@@ -4610,6 +4838,14 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
               ))}
             </div>
           ))}
+          <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr", padding: "7px 14px", alignItems: "center", borderTop: `2px solid ${LINE}`, gap: 8, background: "#F4F8FD" }}>
+            <span style={{ fontWeight: 700, fontSize: 13 }}>Boarding fee<span style={{ display: "block", fontSize: 10.5, fontWeight: 400, color: "#6b6656" }}>boarders only, any class</span></span>
+            {SCHOOL_TERMS.map((t) => (
+              <input key={t.term} type="number" min={0} value={cellValue(BOARDING_KEY, t.term)} placeholder="0"
+                onChange={(e) => setEdits((ed) => ({ ...ed, [termFeeKey(BOARDING_KEY, year, t.term)]: e.target.value }))}
+                className="focus-ring" style={{ padding: "6px 8px", borderRadius: 7, border: `1px solid ${LINE}`, fontFamily: MONO_FONT, fontSize: 12.5, width: "100%" }} />
+            ))}
+          </div>
         </div>
         <button onClick={saveFees} disabled={!dirty || saving} className="focus-ring" style={{ marginTop: 12, padding: "9px 16px", borderRadius: 9, border: "none", background: dirty ? ACCENT : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 13, cursor: dirty ? "pointer" : "not-allowed" }}>{saving ? "Saving…" : "Save fees"}</button>
       </div>
@@ -4625,9 +4861,19 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
         </div>
         <p style={{ fontSize: 12.5, marginTop: 10, color: "#4a4536" }}>
           Will bill <b>{plan.toBill.length}</b> student{plan.toBill.length === 1 ? "" : "s"} · <b>{money(planTotal)}</b>
+          {plan.toBill.some((x) => x.boarding > 0) && <> · incl. boarding for {plan.toBill.filter((x) => x.boarding > 0).length} boarder{plan.toBill.filter((x) => x.boarding > 0).length === 1 ? "" : "s"}</>}
           {plan.already > 0 && <> · {plan.already} already billed</>}
           {plan.noFeeClasses.length > 0 && <span style={{ color: "#a1442c", fontWeight: 600 }}> · no fee set for: {plan.noFeeClasses.join(", ")}</span>}
         </p>
+        {plan.topUps.length > 0 && (
+          <div className="flex items-center gap-3 flex-wrap" style={{ marginTop: 10, padding: "10px 12px", borderRadius: 10, background: "#FFF7EA", border: "1px solid #F0DDB8", fontSize: 12.5 }}>
+            <span style={{ flex: 1, color: "#7a5a1c" }}><b>{plan.topUps.length}</b> boarder{plan.topUps.length === 1 ? " was" : "s were"} billed for this term without the boarding fee ({money(plan.boardingFee)} each).</span>
+            <button
+              onClick={async () => { setBusy(true); try { const n = await applyBoardingTopUps(year, term); showToast(`Added the boarding fee to ${n} bill${n === 1 ? "" : "s"}`); } catch (err) { showToast(err.message || "Couldn't update"); } finally { setBusy(false); } }}
+              disabled={busy} className="focus-ring" style={{ padding: "7px 12px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >Add boarding fee to their bills</button>
+          </div>
+        )}
       </div>
 
       <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Terms billed</div>
@@ -8609,7 +8855,7 @@ async function fetchTermFees(token) {
   return Object.fromEntries(rows.map((r) => [termFeeKey(r.class, r.year, r.term), Number(r.amount)]));
 }
 function mapChargeRow(r) {
-  return { id: r.id, studentId: r.student_id, year: r.year, term: r.term, description: r.description || "", amount: Number(r.amount) };
+  return { id: r.id, studentId: r.student_id, year: r.year, term: r.term, description: r.description || "", amount: Number(r.amount), boardingAmount: Number(r.boarding_amount) || 0 };
 }
 async function fetchStudentCharges(token) {
   const rows = await pgFetchAll("student_charges?select=*&order=created_at,id", token);
