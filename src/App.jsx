@@ -333,7 +333,7 @@ async function fetchPayslips(token) {
 // Library shelves — the categories a book is filed under. Course books are
 // further tracked per subject and class; the rest are supplementary shelves.
 const BOOK_SHELVES = ["Course Books", "Supplementary Books", "Story Books", "Encyclopedias", "Bibles", "Dictionary", "Amusing", "Atlas"];
-const PAYMENT_ACCOUNTS = ["School Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
+const PAYMENT_ACCOUNTS = ["School Fees", "Boarding Fees", "Admission Fees", "Exams", "Computer", "Library", "Food", "Transport", "Sports", "Equipment", "Others"];
 const COMPULSORY_ACCOUNTS = ["School Fees"];
 // ---- Fees by term -----------------------------------------------------
 // The school year has three terms. Fees are set per class for each term, and
@@ -361,15 +361,22 @@ const BOARDING_KEY = "__boarding__";
 // (no cutover date) this is the old single-fee calculation, so nothing
 // changes until the school switches over.
 function schoolFeesSummary(student, env) {
+  return feesSummary(student, "School Fees", env);
+}
+// A student's position on one billed account ("School Fees" or "Boarding
+// Fees"). Each account has its own bills and its own payments, so a payment
+// against boarding never clears a tuition bill, and the other way round.
+function feesSummary(student, account, env) {
   const { feeStructure, payments, studentCharges, cutoverDate } = env;
-  const mine = payments.filter((p) => p.studentId === student.id && p.account === "School Fees");
+  const mine = payments.filter((p) => p.studentId === student.id && p.account === account);
   if (!cutoverDate) {
-    const due = feeStructure[student.class] || 0;
+    // Before billing by term starts: the old single class fee (tuition only).
+    const due = account === "School Fees" ? (feeStructure[student.class] || 0) : 0;
     const paid = mine.reduce((s, p) => s + p.amount, 0);
     return { billing: false, due, paid, balance: due - paid, credit: Math.max(0, paid - due), terms: [] };
   }
   const charges = studentCharges
-    .filter((c) => c.studentId === student.id)
+    .filter((c) => c.studentId === student.id && (c.account || "School Fees") === account)
     .sort((a, b) => (a.term === 0 ? 0 : a.year * 10 + a.term) - (b.term === 0 ? 0 : b.year * 10 + b.term));
   // A negative brought-forward balance means the family was in credit.
   const carriedCredit = charges.filter((c) => c.amount < 0).reduce((s, c) => s - c.amount, 0);
@@ -379,39 +386,39 @@ function schoolFeesSummary(student, env) {
   const terms = bills.map((c) => {
     const applied = Math.min(c.amount, Math.max(0, pool));
     pool -= applied;
-    return { id: c.id, year: c.year, term: c.term, description: c.description, amount: c.amount, boardingAmount: c.boardingAmount || 0, paid: applied, balance: c.amount - applied };
+    return { id: c.id, account, year: c.year, term: c.term, description: c.description, amount: c.amount, paid: applied, balance: c.amount - applied };
   });
   const due = bills.reduce((s, c) => s + c.amount, 0);
   return { billing: true, due, paid: poolTotal, balance: due - poolTotal, credit: Math.max(0, poolTotal - due), terms };
 }
+const BILLED_ACCOUNTS = ["School Fees", "Boarding Fees"];
 function feeDueFor(student, acct, env, otherFeeStructure) {
-  if (acct === "School Fees") return schoolFeesSummary(student, env).due;
+  if (BILLED_ACCOUNTS.includes(acct)) return feesSummary(student, acct, env).due;
   return otherFeeStructure[acct]?.[student.class] || 0;
 }
 function feePaidFor(student, acct, env) {
-  if (acct === "School Fees") return schoolFeesSummary(student, env).paid;
+  if (BILLED_ACCOUNTS.includes(acct)) return feesSummary(student, acct, env).paid;
   return env.payments.filter((p) => p.studentId === student.id && p.account === acct).reduce((s, p) => s + p.amount, 0);
 }
 // Who would be billed for a term, and who can't be (no fee set for their class).
 function planTermBilling(students, termFees, studentCharges, year, term) {
+  const y = Number(year), t = Number(term);
   const boardingFee = termFees[termFeeKey(BOARDING_KEY, year, term)] || 0;
-  const charged = new Map(studentCharges.filter((c) => c.year === Number(year) && c.term === Number(term)).map((c) => [c.studentId, c]));
-  const toBill = [], topUps = [], noFee = new Set();
+  const has = (studentId, account) => studentCharges.some((c) => c.studentId === studentId && c.year === y && c.term === t && (c.account || "School Fees") === account);
+  const toBill = [], boardingBills = [], noFee = new Set();
   let already = 0;
   students.forEach((st) => {
-    const existing = charged.get(st.id);
-    if (existing) {
-      already++;
-      // A boarder billed before the boarding fee existed / before being placed in a house.
-      if (st.houseId && boardingFee > 0 && !(existing.boardingAmount > 0)) topUps.push({ student: st, charge: existing, boarding: boardingFee });
-      return;
+    if (has(st.id, "School Fees")) already++;
+    else {
+      const tuition = termFees[termFeeKey(st.class, year, term)];
+      if (!tuition) noFee.add(st.class);
+      else toBill.push({ student: st, amount: tuition });
     }
-    const tuition = termFees[termFeeKey(st.class, year, term)];
-    if (!tuition) { noFee.add(st.class); return; }
-    const boarding = st.houseId ? boardingFee : 0;
-    toBill.push({ student: st, amount: tuition + boarding, boarding });
+    // Boarders are billed the boarding fee separately, whether or not their
+    // tuition bill already exists (e.g. placed in a house later).
+    if (st.houseId && boardingFee > 0 && !has(st.id, "Boarding Fees")) boardingBills.push({ student: st, amount: boardingFee });
   });
-  return { toBill, already, noFeeClasses: [...noFee], topUps, boardingFee };
+  return { toBill, boardingBills, already, noFeeClasses: [...noFee], boardingFee };
 }
 
 // What's actually available to spend from an account: money collected,
@@ -431,6 +438,7 @@ function accountBalance(account, payments, expenditures, accountLoans) {
 const RECEIPT_ITEMS = [
   { account: "Admission Fees", label: "Admission Fees" },
   { account: "School Fees", label: "Tuition Fees" },
+  { account: "Boarding Fees", label: "Boarding Fees" },
   { account: "Exams", label: "Exams" },
   { account: "Computer", label: "Computer" },
   { account: "Library", label: "Library" },
@@ -1573,7 +1581,7 @@ export default function App() {
   const insertCharges = async (rows) => {
     const added = [];
     for (let i = 0; i < rows.length; i += 200) {
-      const res = await pgFetch("student_charges?on_conflict=student_id,year,term", authedUser.accessToken, {
+      const res = await pgFetch("student_charges?on_conflict=student_id,year,term,account", authedUser.accessToken, {
         method: "POST", body: rows.slice(i, i + 200), prefer: "resolution=ignore-duplicates,return=representation",
       });
       added.push(...(res || []).map(mapChargeRow));
@@ -1604,32 +1612,24 @@ export default function App() {
   };
   const billTerm = async (year, term, setCurrent) => {
     const plan = planTermBilling(activeStudents, termFees, studentCharges, year, term);
-    const added = await insertCharges(plan.toBill.map(({ student, amount, boarding }) => ({ student_id: student.id, year: Number(year), term: Number(term), description: boarding > 0 ? `Term ${term} ${year} fees (incl. boarding)` : `Term ${term} ${year} fees`, amount, boarding_amount: boarding, created_by: authedUser.id })));
+    const mk = (student, amount, account, description) => ({ student_id: student.id, year: Number(year), term: Number(term), account, description, amount, created_by: authedUser.id });
+    const tuitionAdded = await insertCharges(plan.toBill.map(({ student, amount }) => mk(student, amount, "School Fees", `Term ${term} ${year} fees`)));
+    const boardingAdded = await insertCharges(plan.boardingBills.map(({ student, amount }) => mk(student, amount, "Boarding Fees", `Term ${term} ${year} boarding fee`)));
     if (setCurrent) {
       await pgFetch("school_settings?id=eq.1", authedUser.accessToken, { method: "PATCH", body: { current_term: `Term ${term}` }, prefer: "return=minimal" });
       setSchoolSettings((prev) => ({ ...prev, currentTerm: `Term ${term}` }));
     }
-    return { billed: added, already: plan.already, noFeeClasses: plan.noFeeClasses };
-  };
-  // Adds the boarding fee to boarders who were billed for the term before
-  // they were placed in a house (or before the boarding fee was set).
-  const applyBoardingTopUps = async (year, term) => {
-    const plan = planTermBilling(activeStudents, termFees, studentCharges, year, term);
-    for (const t of plan.topUps) {
-      await pgFetch(`student_charges?id=eq.${t.charge.id}`, authedUser.accessToken, { method: "PATCH", body: { amount: t.charge.amount + t.boarding, boarding_amount: t.boarding }, prefer: "return=minimal" });
-    }
-    setStudentCharges((prev) => prev.map((c) => { const t = plan.topUps.find((x) => x.charge.id === c.id); return t ? { ...c, amount: c.amount + t.boarding, boardingAmount: t.boarding } : c; }));
-    return plan.topUps.length;
+    return { billed: tuitionAdded, boardingBilled: boardingAdded, already: plan.already, noFeeClasses: plan.noFeeClasses };
   };
   const updateBroughtForward = async (studentId, amount) => {
-    const existing = studentCharges.find((c) => c.studentId === studentId && c.term === 0);
+    const existing = studentCharges.find((c) => c.studentId === studentId && c.term === 0 && (c.account || "School Fees") === "School Fees");
     const year = existing ? existing.year : new Date().getFullYear();
-    const [row] = await pgFetch("student_charges?on_conflict=student_id,year,term", authedUser.accessToken, {
-      method: "POST", body: { student_id: studentId, year, term: 0, description: "Balance brought forward", amount: Number(amount) || 0, created_by: authedUser.id },
+    const [row] = await pgFetch("student_charges?on_conflict=student_id,year,term,account", authedUser.accessToken, {
+      method: "POST", body: { student_id: studentId, year, term: 0, account: "School Fees", description: "Balance brought forward", amount: Number(amount) || 0, created_by: authedUser.id },
       prefer: "resolution=merge-duplicates,return=representation",
     });
     const saved = mapChargeRow(row);
-    setStudentCharges((prev) => [...prev.filter((c) => !(c.studentId === studentId && c.term === 0)), saved]);
+    setStudentCharges((prev) => [...prev.filter((c) => !(c.studentId === studentId && c.term === 0 && (c.account || "School Fees") === "School Fees")), saved]);
   };
 
   // M-Pesa Till payments
@@ -2057,7 +2057,7 @@ export default function App() {
     leaveRequests, addLeave, decideLeave, deleteLeave,
     staffDocuments, addStaffDocument, deleteStaffDocument, openStaffDocument,
     mpesaTransactions, importMpesaTransactions, allocateMpesa, setMpesaIgnored,
-    termFees, studentCharges, feeEnv, saveTermFee, startTermBilling, billTerm, applyBoardingTopUps, updateBroughtForward,
+    termFees, studentCharges, feeEnv, saveTermFee, startTermBilling, billTerm, updateBroughtForward,
     houses, isHouseMaster, addHouse, updateHouse, deleteHouse, assignHouse,
     generateLessonPlan,
     visitors, addVisitor, setVisitorFollowUp, completeFollowUp, deleteVisitor,
@@ -3559,6 +3559,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
   const rate = myAttendance.length ? Math.round((present / myAttendance.length) * 100) : 0;
   const myPayments = payments.filter((p) => p.studentId === student.id);
   const feeSummary = schoolFeesSummary(student, feeEnv);
+  const boardingSummary = feesSummary(student, "Boarding Fees", feeEnv);
   const { due, paid, balance } = feeSummary;
 
   const confirmedDelete = async () => {
@@ -3666,7 +3667,7 @@ function StudentProfile({ student, onClose, grades, attendance, payments, record
             </div>
           )}
           {tab === "payments" && (
-            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPaymentBatch={recordPaymentBatch} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} feeTerms={feeSummary.billing ? feeSummary.terms : null} />
+            <PaymentsTab student={student} due={due} paid={paid} balance={balance} payments={myPayments} otherFeeStructure={otherFeeStructure} recordPaymentBatch={recordPaymentBatch} deletePayment={deletePayment} showToast={showToast} schoolSettings={schoolSettings} feeTerms={feeSummary.billing ? [...feeSummary.terms, ...boardingSummary.terms] : null} boarding={boardingSummary} />
           )}
         </div>
       </div>
@@ -3732,10 +3733,10 @@ function AttendanceBadge({ status }) {
   return <span className="flex items-center gap-1.5" style={{ color: m.color, fontSize: 12.5, fontWeight: 600 }}><Icon size={13} />{status}</span>;
 }
 
-function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPaymentBatch, deletePayment, showToast, schoolSettings, feeTerms }) {
+function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure, recordPaymentBatch, deletePayment, showToast, schoolSettings, feeTerms, boarding }) {
   const [payOpen, setPayOpen] = useState(false);
-  const dueForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? due : (otherFeeStructure[acct]?.[student.class] || 0));
-  const paidToDateForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? paid : payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0));
+  const dueForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? due : acct === "Boarding Fees" ? (boarding?.due || 0) : (otherFeeStructure[acct]?.[student.class] || 0));
+  const paidToDateForAccount = (acct) => (COMPULSORY_ACCOUNTS.includes(acct) ? paid : acct === "Boarding Fees" ? (boarding?.paid || 0) : payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0));
 
   return (
     <div>
@@ -3744,7 +3745,7 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
           <div style={{ padding: "7px 10px", fontSize: 10.5, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>Fees by term (oldest paid first)</div>
           {feeTerms.map((t) => (
             <div key={t.id} className="flex items-center justify-between" style={{ padding: "6px 10px", fontSize: 12, borderTop: `1px solid ${LINE}` }}>
-              <span style={{ fontWeight: 600 }}>{t.term === 0 ? "Brought forward" : `Term ${t.term} ${t.year}`}{t.boardingAmount > 0 && <span style={{ display: "block", fontSize: 10.5, fontWeight: 400, color: "#6b6656" }}>incl. boarding {money(t.boardingAmount)}</span>}</span>
+              <span style={{ fontWeight: 600 }}>{t.term === 0 ? "Brought forward" : `Term ${t.term} ${t.year}`}{t.account === "Boarding Fees" ? " · Boarding" : ""}</span>
               <span style={{ fontFamily: MONO_FONT, color: "#6b6656" }}>{money(t.amount)}</span>
               <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: t.balance > 0 ? "#a1442c" : "#2f6f4a" }}>{t.balance > 0 ? `${money(t.balance)} owing` : "Paid"}</span>
             </div>
@@ -3754,8 +3755,8 @@ function PaymentsTab({ student, due, paid, balance, payments, otherFeeStructure,
       <div className="grid grid-cols-2 gap-2 mb-3">
         {PAYMENT_ACCOUNTS.map((acct) => {
           const isCompulsory = COMPULSORY_ACCOUNTS.includes(acct);
-          const acctDue = isCompulsory ? due : (otherFeeStructure[acct]?.[student.class] || 0);
-          const acctPaid = isCompulsory ? paid : payments.filter((p) => p.account === acct).reduce((s, p) => s + p.amount, 0);
+          const acctDue = dueForAccount(acct);
+          const acctPaid = paidToDateForAccount(acct);
           const acctBalance = acctDue - acctPaid;
           return (
             <div key={acct} style={{ border: `1px solid ${LINE}`, borderRadius: 10, padding: "8px 10px" }}>
@@ -4170,8 +4171,8 @@ function GradesView({ students, classes, exams, fetchClassMarksForExam, classGra
  * ---------------------------------------------------------------------- */
 function FeesView(ctx) {
   const [tab, setTab] = useState("fees");
-  const tabs = ["fees", "other", "billing", "mpesa", "accounts", "expenditure"];
-  const labels = { fees: "School Fees", other: "Other Payments", billing: "Term Billing", mpesa: "M-Pesa", accounts: "Accounts", expenditure: "Expenditure" };
+  const tabs = ["fees", "boarding", "other", "billing", "mpesa", "accounts", "expenditure"];
+  const labels = { fees: "School Fees", boarding: "Boarding Fees", other: "Other Payments", billing: "Term Billing", mpesa: "M-Pesa", accounts: "Accounts", expenditure: "Expenditure" };
   return (
     <div className="px-7 py-6" style={{ maxWidth: 1080 }}>
       <div className="flex items-center justify-between mb-5">
@@ -4188,6 +4189,7 @@ function FeesView(ctx) {
       {tab === "fees" && <SchoolFeesTab {...ctx} />}
       {tab === "other" && <OtherPaymentsTab {...ctx} />}
       {tab === "accounts" && <AccountsOverviewTab {...ctx} />}
+      {tab === "boarding" && <BoardingFeesTab {...ctx} />}
       {tab === "billing" && <TermBillingTab {...ctx} />}
       {tab === "mpesa" && <MpesaTab {...ctx} />}
       {tab === "expenditure" && <ExpenditureTab {...ctx} />}
@@ -4328,7 +4330,8 @@ function SchoolFeesTab({ students, payments, recordPaymentBatch, deletePayment, 
 // shape as School Fees, but switchable between accounts, and a class
 // without a set amount just shows what's been paid with no due/balance nag.
 function OtherPaymentsTab({ students, payments, recordPaymentBatch, deletePayment, showToast, otherFeeStructure, feeStructure, classes, schoolSettings, feeEnv }) {
-  const OPTIONAL_ACCOUNTS = PAYMENT_ACCOUNTS.filter((a) => !COMPULSORY_ACCOUNTS.includes(a));
+  // Boarding Fees is billed per term from Term Billing, not set per class here.
+  const OPTIONAL_ACCOUNTS = PAYMENT_ACCOUNTS.filter((a) => !COMPULSORY_ACCOUNTS.includes(a) && a !== "Boarding Fees");
   const [account, setAccount] = useState(OPTIONAL_ACCOUNTS[0]);
   const [cls, setCls] = useState("All");
   const [modalStudent, setModalStudent] = useState(null);
@@ -4734,7 +4737,7 @@ function MpesaTab({ students, allStudents, payments, feeStructure, otherFeeStruc
 
 // Fees by term: set each class's fee per term, bill a term, and review
 // brought-forward balances. Billing is switched on once, by "Start term billing".
-function TermBillingTab({ students, allStudents, classes, termFees, studentCharges, feeEnv, schoolSettings, feeStructure, payments, saveTermFee, startTermBilling, billTerm, applyBoardingTopUps, updateBroughtForward, showToast }) {
+function TermBillingTab({ students, allStudents, classes, termFees, studentCharges, feeEnv, schoolSettings, feeStructure, payments, saveTermFee, startTermBilling, billTerm, updateBroughtForward, showToast }) {
   const cutover = schoolSettings?.feeCutoverDate || "";
   const suggested = termForDate();
   const [year, setYear] = useState(suggested.year);
@@ -4799,15 +4802,15 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
     setBusy(true);
     try {
       const r = await billTerm(year, term, setCurrent);
-      showToast(`Term ${term} ${year}: billed ${r.billed} student${r.billed === 1 ? "" : "s"}`);
+      showToast(`Term ${term} ${year}: billed ${r.billed} student${r.billed === 1 ? "" : "s"}${r.boardingBilled ? ` and ${r.boardingBilled} boarder${r.boardingBilled === 1 ? "" : "s"} for boarding` : ""}`);
     } catch (err) { showToast(err.message || "Couldn't bill the term"); }
     finally { setBusy(false); }
   };
 
   const history = {};
-  studentCharges.filter((c) => c.term > 0).forEach((c) => { const k = `${c.year}-${c.term}`; history[k] = history[k] || { year: c.year, term: c.term, count: 0, total: 0 }; history[k].count++; history[k].total += c.amount; });
-  const historyRows = Object.values(history).sort((a, b) => b.year - a.year || b.term - a.term);
-  const bfRows = everyone.map((st) => ({ st, bf: studentCharges.find((c) => c.studentId === st.id && c.term === 0) })).filter((r) => r.bf && (r.bf.amount !== 0 || bfEdits[r.st.id] != null));
+  studentCharges.filter((c) => c.term > 0).forEach((c) => { const acct = c.account || "School Fees"; const k = `${c.year}-${c.term}-${acct}`; history[k] = history[k] || { year: c.year, term: c.term, account: acct, count: 0, total: 0 }; history[k].count++; history[k].total += c.amount; });
+  const historyRows = Object.values(history).sort((a, b) => b.year - a.year || b.term - a.term || a.account.localeCompare(b.account));
+  const bfRows = everyone.map((st) => ({ st, bf: studentCharges.find((c) => c.studentId === st.id && c.term === 0 && (c.account || "School Fees") === "School Fees") })).filter((r) => r.bf && (r.bf.amount !== 0 || bfEdits[r.st.id] != null));
   const saveBf = async (st) => {
     const v = bfEdits[st.id];
     if (v == null) return;
@@ -4839,7 +4842,7 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
             </div>
           ))}
           <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 1fr 1fr", padding: "7px 14px", alignItems: "center", borderTop: `2px solid ${LINE}`, gap: 8, background: "#F4F8FD" }}>
-            <span style={{ fontWeight: 700, fontSize: 13 }}>Boarding fee<span style={{ display: "block", fontSize: 10.5, fontWeight: 400, color: "#6b6656" }}>boarders only, any class</span></span>
+            <span style={{ fontWeight: 700, fontSize: 13 }}>Boarding fee<span style={{ display: "block", fontSize: 10.5, fontWeight: 400, color: "#6b6656" }}>boarders only · own receipt line</span></span>
             {SCHOOL_TERMS.map((t) => (
               <input key={t.term} type="number" min={0} value={cellValue(BOARDING_KEY, t.term)} placeholder="0"
                 onChange={(e) => setEdits((ed) => ({ ...ed, [termFeeKey(BOARDING_KEY, year, t.term)]: e.target.value }))}
@@ -4852,35 +4855,26 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18 }}>
         <h3 style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 4 }}>Bill a term</h3>
-        <p style={{ fontSize: 12, color: "#7A7568", marginBottom: 10 }}>Bills every enrolled student at their current class's fee. Promote classes first when starting a new year. Students already billed for the term are skipped, so it's safe to run again for late joiners.</p>
+        <p style={{ fontSize: 12, color: "#7A7568", marginBottom: 10 }}>Bills every enrolled student at their current class's fee. Promote classes first when starting a new year. Boarders are billed the boarding fee as a separate line. Anyone already billed is skipped, so it's safe to run again for late joiners or students placed in a house later.</p>
         <div className="flex items-end gap-3 flex-wrap">
           <Field label="Year"><select value={year} onChange={(e) => setYear(Number(e.target.value))} className="focus-ring" style={{ ...inputStyle, width: 110 }}>{years.map((y) => <option key={y}>{y}</option>)}</select></Field>
           <Field label="Term"><select value={term} onChange={(e) => setTerm(Number(e.target.value))} className="focus-ring" style={{ ...inputStyle, width: 130 }}>{SCHOOL_TERMS.map((t) => <option key={t.term} value={t.term}>{t.label}</option>)}</select></Field>
           <label className="flex items-center gap-1.5" style={{ fontSize: 12.5, paddingBottom: 9 }}><input type="checkbox" checked={setCurrent} onChange={(e) => setSetCurrent(e.target.checked)} /> Also set the current term to Term {term}</label>
-          <button onClick={doBill} disabled={busy || plan.toBill.length === 0} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: plan.toBill.length ? RAIL : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 13, cursor: plan.toBill.length && !busy ? "pointer" : "not-allowed" }}>{busy ? "Billing…" : `Bill Term ${term} ${year}`}</button>
+          <button onClick={doBill} disabled={busy || (plan.toBill.length + plan.boardingBills.length) === 0} className="focus-ring" style={{ padding: "9px 16px", borderRadius: 9, border: "none", background: (plan.toBill.length + plan.boardingBills.length) ? RAIL : "#c9c2ac", color: "#fff", fontWeight: 700, fontSize: 13, cursor: (plan.toBill.length + plan.boardingBills.length) && !busy ? "pointer" : "not-allowed" }}>{busy ? "Billing…" : `Bill Term ${term} ${year}`}</button>
         </div>
         <p style={{ fontSize: 12.5, marginTop: 10, color: "#4a4536" }}>
           Will bill <b>{plan.toBill.length}</b> student{plan.toBill.length === 1 ? "" : "s"} · <b>{money(planTotal)}</b>
-          {plan.toBill.some((x) => x.boarding > 0) && <> · incl. boarding for {plan.toBill.filter((x) => x.boarding > 0).length} boarder{plan.toBill.filter((x) => x.boarding > 0).length === 1 ? "" : "s"}</>}
+          {plan.boardingBills.length > 0 && <> · plus a separate boarding fee for <b>{plan.boardingBills.length}</b> boarder{plan.boardingBills.length === 1 ? "" : "s"} ({money(plan.boardingBills.reduce((s, x) => s + x.amount, 0))})</>}
           {plan.already > 0 && <> · {plan.already} already billed</>}
           {plan.noFeeClasses.length > 0 && <span style={{ color: "#a1442c", fontWeight: 600 }}> · no fee set for: {plan.noFeeClasses.join(", ")}</span>}
         </p>
-        {plan.topUps.length > 0 && (
-          <div className="flex items-center gap-3 flex-wrap" style={{ marginTop: 10, padding: "10px 12px", borderRadius: 10, background: "#FFF7EA", border: "1px solid #F0DDB8", fontSize: 12.5 }}>
-            <span style={{ flex: 1, color: "#7a5a1c" }}><b>{plan.topUps.length}</b> boarder{plan.topUps.length === 1 ? " was" : "s were"} billed for this term without the boarding fee ({money(plan.boardingFee)} each).</span>
-            <button
-              onClick={async () => { setBusy(true); try { const n = await applyBoardingTopUps(year, term); showToast(`Added the boarding fee to ${n} bill${n === 1 ? "" : "s"}`); } catch (err) { showToast(err.message || "Couldn't update"); } finally { setBusy(false); } }}
-              disabled={busy} className="focus-ring" style={{ padding: "7px 12px", borderRadius: 8, border: "none", background: "#A1702C", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
-            >Add boarding fee to their bills</button>
-          </div>
-        )}
       </div>
 
       <div style={{ fontSize: 11, fontWeight: 700, color: "#a39c86", textTransform: "uppercase", marginBottom: 8 }}>Terms billed</div>
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden", marginBottom: 18 }}>
         {historyRows.map((h) => (
-          <div key={`${h.year}-${h.term}`} className="flex items-center justify-between" style={{ padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}` }}>
-            <span style={{ fontWeight: 600 }}>Term {h.term} {h.year}</span><span>{h.count} students</span><span style={{ fontFamily: MONO_FONT, fontWeight: 700 }}>{money(h.total)}</span>
+          <div key={`${h.year}-${h.term}-${h.account}`} className="flex items-center justify-between" style={{ padding: "9px 16px", fontSize: 13, borderBottom: `1px solid ${LINE}` }}>
+            <span style={{ fontWeight: 600 }}>Term {h.term} {h.year} · {h.account === "Boarding Fees" ? "Boarding" : "Tuition"}</span><span>{h.count} students</span><span style={{ fontFamily: MONO_FONT, fontWeight: 700 }}>{money(h.total)}</span>
           </div>
         ))}
         {historyRows.length === 0 && <div className="text-center py-6" style={{ color: "#a39c86", fontSize: 13 }}>No terms billed yet.</div>}
@@ -4897,6 +4891,72 @@ function TermBillingTab({ students, allStudents, classes, termFees, studentCharg
         ))}
         {bfRows.length === 0 && <div className="text-center py-6" style={{ color: "#a39c86", fontSize: 13 }}>No balances were brought forward.</div>}
       </div>
+    </div>
+  );
+}
+
+// Boarding fees per boarder: what's billed (per term, from Term Billing),
+// paid and owing. Payments here are recorded against the Boarding Fees line.
+function BoardingFeesTab({ students, houses, payments, feeEnv, otherFeeStructure, schoolSettings, recordPaymentBatch, showToast }) {
+  const [q, setQ] = useState("");
+  const [houseFilter, setHouseFilter] = useState("All");
+  const [modalStudent, setModalStudent] = useState(null);
+  const cutover = schoolSettings?.feeCutoverDate || "";
+  const houseName = (id) => houses.find((h) => h.id === id)?.name || "—";
+  const ql = q.trim().toLowerCase();
+  const rows = students
+    .filter((s) => s.houseId || feesSummary(s, "Boarding Fees", feeEnv).due > 0)
+    .filter((s) => houseFilter === "All" || s.houseId === houseFilter)
+    .filter((s) => !ql || s.name.toLowerCase().includes(ql) || String(s.admissionNo || "").toLowerCase().includes(ql))
+    .map((s) => ({ student: s, f: feesSummary(s, "Boarding Fees", feeEnv) }))
+    .sort((a, b) => a.student.name.localeCompare(b.student.name));
+  const totalDue = rows.reduce((n, r) => n + r.f.due, 0);
+  const totalPaid = rows.reduce((n, r) => n + r.f.paid, 0);
+
+  if (!cutover) return <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 20, fontSize: 13, color: "#6b6656", maxWidth: 620 }}>Boarding fees are billed by term. Start term billing under the <b>Term Billing</b> tab first, set the boarding fee for each term, and bill the term.</div>;
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 flex-wrap mb-3">
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search boarder" className="focus-ring" style={{ ...inputStyle, width: 240 }} />
+        <select value={houseFilter} onChange={(e) => setHouseFilter(e.target.value)} className="focus-ring" style={{ ...inputStyle, width: 170 }}><option value="All">All houses</option>{houses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}</select>
+        <span style={{ marginLeft: "auto", fontSize: 12.5, color: "#4a4536" }}>Billed <b>{money(totalDue)}</b> · Paid <b>{money(totalPaid)}</b> · Owing <b style={{ color: "#a1442c" }}>{money(Math.max(0, totalDue - totalPaid))}</b></span>
+      </div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1fr 1fr 0.8fr", padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#4A4536", background: "#EFE9D8", textTransform: "uppercase" }}>
+          <span>Boarder</span><span>House</span><span>Billed</span><span>Paid</span><span>Balance</span><span></span>
+        </div>
+        {rows.map(({ student: s, f }) => (
+          <div key={s.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 1fr 1fr 1fr 1fr 0.8fr", padding: "8px 16px", fontSize: 13, borderTop: `1px solid ${LINE}`, alignItems: "center" }}>
+            <span style={{ fontWeight: 600 }}>{s.name}<span style={{ display: "block", fontSize: 11, color: "#6b6656", fontWeight: 400 }}>{s.class}</span></span>
+            <span>{houseName(s.houseId)}</span>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12 }}>{money(f.due)}</span>
+            <span style={{ fontFamily: MONO_FONT, fontSize: 12, color: "#2f6f4a" }}>{money(f.paid)}</span>
+            <span style={{ fontFamily: MONO_FONT, fontWeight: 700, color: f.balance > 0 ? "#a1442c" : "#2f6f4a" }}>{money(f.balance)}</span>
+            <button onClick={() => setModalStudent(s)} className="focus-ring" style={{ justifySelf: "end", padding: "5px 12px", borderRadius: 7, border: "none", background: ACCENT, color: "#fff", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Pay</button>
+          </div>
+        ))}
+        {rows.length === 0 && <div className="text-center py-10" style={{ color: "#a39c86", fontSize: 13 }}>No boarders yet — place students in houses under Boarding.</div>}
+      </div>
+
+      {modalStudent && (
+        <MultiPayModal
+          student={modalStudent}
+          initialAmounts={{ "Boarding Fees": "" }}
+          dueForAccount={(acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure)}
+          paidToDateForAccount={(acct) => feePaidFor(modalStudent, acct, feeEnv)}
+          onClose={() => setModalStudent(null)}
+          onSubmit={async ({ date, method, entries }) => {
+            try {
+              const saved = await recordPaymentBatch(modalStudent.id, { date, method, entries });
+              showToast(`Recorded ${money(entries.reduce((n, e) => n + e.amount, 0))} for ${modalStudent.name}`);
+              const entryAmount = Object.fromEntries(entries.map((e) => [e.account, e.amount]));
+              printDocument(`${modalStudent.name} Receipt`, buildReceiptHtml({ schoolSettings, student: modalStudent, payments: saved, date, method, receiptId: saved[0].id, dueForAccount: (acct) => feeDueFor(modalStudent, acct, feeEnv, otherFeeStructure), paidToDateForAccount: (acct) => feePaidFor(modalStudent, acct, feeEnv) + (entryAmount[acct] || 0) }), "A5");
+              setModalStudent(null);
+            } catch (err) { showToast(err.message || "Couldn't record payment"); }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -8855,7 +8915,7 @@ async function fetchTermFees(token) {
   return Object.fromEntries(rows.map((r) => [termFeeKey(r.class, r.year, r.term), Number(r.amount)]));
 }
 function mapChargeRow(r) {
-  return { id: r.id, studentId: r.student_id, year: r.year, term: r.term, description: r.description || "", amount: Number(r.amount), boardingAmount: Number(r.boarding_amount) || 0 };
+  return { id: r.id, studentId: r.student_id, year: r.year, term: r.term, description: r.description || "", amount: Number(r.amount), account: r.account || "School Fees" };
 }
 async function fetchStudentCharges(token) {
   const rows = await pgFetchAll("student_charges?select=*&order=created_at,id", token);
