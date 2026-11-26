@@ -427,3 +427,15 @@ CREATE POLICY "boarding_houses_staff_view" ON public.boarding_houses FOR SELECT
 ALTER TABLE public.students ADD COLUMN IF NOT EXISTS house_id uuid REFERENCES public.boarding_houses(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS students_house_idx ON public.students (house_id);
 ALTER TABLE public.student_charges ADD COLUMN IF NOT EXISTS boarding_amount numeric NOT NULL DEFAULT 0;
+
+-- Boarding fee as its own account: charges now belong to an account, so the
+-- boarding fee is billed and paid as a separate line from school fees.
+ALTER TABLE public.student_charges ADD COLUMN IF NOT EXISTS account text NOT NULL DEFAULT 'School Fees';
+DO $$
+DECLARE c record;
+BEGIN
+  FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'public.student_charges'::regclass AND contype = 'u'
+  LOOP EXECUTE format('ALTER TABLE public.student_charges DROP CONSTRAINT %I', c.conname); END LOOP;
+END $$;
+ALTER TABLE public.student_charges
+  ADD CONSTRAINT student_charges_student_year_term_account_key UNIQUE (student_id, year, term, account);
